@@ -15,6 +15,7 @@ namespace ClipBubble
         [STAThread]
         static int Main(string[] args)
         {
+            if (args.Contains("--peer")) return Relay.Run();
             if (args.Contains("--mcp"))
             {
                 Mcp.Run();

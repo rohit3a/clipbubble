@@ -10,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -26,7 +28,7 @@ namespace ClipBubble;
 // MARK: - Model
 
 /// What changed in the model, so views redraw only the part they show.
-enum Change { Clips, Recent, Query, Filter, Selection, Previewing, ShowSettings, Unseen, Mascot, Prefs, Shown }
+enum Change { Clips, Recent, Query, Filter, Selection, Previewing, ShowSettings, Unseen, Mascot, Prefs, Shown, Transfers, Sync }
 
 /// The app's state. Views subscribe to `Changed` and redraw the part named in it, like a SwiftUI ObservableObject.
 sealed class Model
@@ -54,6 +56,22 @@ sealed class Model
     /// Reads happen here on the UI thread; every write goes through `Writer`.
     public readonly Db Db = new();
     public readonly Writer Writer = new();
+    /// Sync with ClipBubble on other machines; null until the app starts it.
+    public Engine? Sync;
+    /// Files moving to or from other machines right now, by clip hash.
+    public Dictionary<string, Transfer> Transfers { get; private set; } = new();
+    /// Linked devices' names by id, for items synced from them.
+    public Dictionary<string, string> Devices { get; private set; } = new();
+
+    /// A transfer that finished changes the item itself, so that reloads; progress only redraws the rows.
+    public void SetTransfers(Dictionary<string, Transfer> t)
+    {
+        var finished = Transfers.Keys.Any(h => !t.ContainsKey(h));
+        Transfers = t;
+        if (finished) Refresh(); else Raise(Change.Transfers);
+    }
+
+    public void SyncChanged() => Raise(Change.Sync);
 
     public Action<Clip, bool> Pick = (_, _) => { };
     public Action PrefsChanged = () => { };
@@ -81,6 +99,7 @@ sealed class Model
         var kind = Store.ParseKind(Filter);
         var source = Filter switch { "shots" => "Screenshot", "downloads" => "Downloads", _ => null };
         Clips = Db.Clips(kind: kind, source: source, query: Query).Where(c => !deleting.Contains(c.Id)).ToList();
+        if (Clips.Any(c => c.Origin.Length > 0)) Devices = Db.DeviceNames();
         if (!Clips.Any(c => c.Id == Selection)) selection = Clips.FirstOrDefault()?.Id;
         Thumbs.Prewarm(Clips.Take(40));
         Raise(Change.Clips);
@@ -128,7 +147,6 @@ sealed class Model
     public bool DeletesWaiting => deleting.Count > 0 || clearing;
 
     /// Gone from the list at once; the reload after the write shows what's really stored (the clip again, if the delete failed).
-    /// A removed screenshot or download is remembered first, so a failure there can't let the backfill bring it back.
     public void Delete(Clip c)
     {
         var i = Math.Max(0, Clips.FindIndex(x => x.Id == c.Id));
@@ -137,7 +155,7 @@ sealed class Model
         if (Selection == c.Id) selection = Clips.Count == 0 ? null : Clips[Math.Min(i, Clips.Count - 1)].Id;
         Raise(Change.Clips);
         if (Recent.RemoveAll(x => x.Id == c.Id) > 0) Raise(Change.Recent);
-        Writer.Write(db => { Forgotten.Remove(c); db.Delete(c.Id); }, failed =>
+        Writer.Write(db => db.Delete(c.Id), failed =>
         {
             deleting.Remove(c.Id);
             Refresh();
@@ -148,7 +166,7 @@ sealed class Model
     public void ClearAll()
     {
         clearing = true;
-        Writer.Write(db => { Forgotten.ClearAll(); db.DeleteAll(); }, failed =>
+        Writer.Write(db => db.DeleteAll(), failed =>
         {
             clearing = false;
             Refresh();
@@ -279,7 +297,7 @@ static class UI
         Search = Glyph(0xE721), Clear = Glyph(0xEB90), Gear = Glyph(0xE713), Clipboard = Glyph(0xE77F),
         Link = Glyph(0xE71B), Camera = Glyph(0xE722), Download = Glyph(0xE896), Back = Glyph(0xE76B), Ok = Glyph(0xEC61),
         Warning = Glyph(0xE7BA), Off = Glyph(0xE738), Plus = Glyph(0xE710), Copy = Glyph(0xE8C8), Check = Glyph(0xE73E),
-        Power = Glyph(0xE7E8), Keyboard = Glyph(0xE765);
+        Power = Glyph(0xE7E8), Keyboard = Glyph(0xE765), Network = Glyph(0xE968), Pause = Glyph(0xE769), Close = Glyph(0xE711);
 
     /// Line height follows SF Pro (1.2x) rather than Segoe's taller default, so rows sit where they do on the Mac.
     public static TextBlock Label(string text, double size, Brush? color = null, FontWeight? weight = null) => new()
@@ -314,6 +332,9 @@ static class UI
         var t = s.Trim();
         return (t.StartsWith("http://") || t.StartsWith("https://")) && !t.Any(char.IsWhiteSpace);
     }
+
+    public static string Size(long bytes) =>
+        bytes < 1000 ? $"{bytes} B" : bytes < 1_000_000 ? $"{bytes / 1000.0:0} KB" : bytes < 1_000_000_000 ? $"{bytes / 1e6:0.#} MB" : $"{bytes / 1e9:0.##} GB";
 
     public static string Ago(DateTime d)
     {
@@ -836,6 +857,22 @@ sealed class BubbleView : Grid
     readonly TextBlock badgeText;
     MascotView mascot;
     public readonly Ellipse HitArea;
+    /// What a click does; screen readers press the bubble through this too.
+    public Action Pressed = () => { };
+
+    /// One button for screen readers like Narrator: "ClipBubble", which opens the history.
+    protected override AutomationPeer OnCreateAutomationPeer() => new BubblePeer(this);
+
+    sealed class BubblePeer(BubbleView bubble) : FrameworkElementAutomationPeer(bubble), IInvokeProvider
+    {
+        protected override AutomationControlType GetAutomationControlTypeCore() => AutomationControlType.Button;
+        protected override string GetClassNameCore() => nameof(BubbleView);
+        protected override string GetNameCore() => "ClipBubble";
+        protected override string GetHelpTextCore() => "Opens your clipboard history";
+        protected override List<AutomationPeer>? GetChildrenCore() => null;
+        public override object? GetPattern(PatternInterface pattern) => pattern == PatternInterface.Invoke ? this : base.GetPattern(pattern);
+        public void Invoke() => bubble.Pressed();
+    }
 
     public BubbleView(Model model)
     {
@@ -936,6 +973,8 @@ sealed class Row : Border
     readonly Model model;
     bool selected;
     TextBlock? hint;
+    readonly TextBlock subtitle;
+    readonly StackPanel side = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     Point? down;
 
     public Row(Clip clip, int index, bool isSelected, Model model)
@@ -959,19 +998,23 @@ sealed class Row : Border
         texts.Children.Add(title);
         var meta = new DockPanel { Margin = new Thickness(0, 2, 0, 0), LastChildFill = true };
         if (SourceIcon() is { } icon) { icon.Margin = new Thickness(0, 0, 4, 0); meta.Children.Add(icon); }
-        meta.Children.Add(UI.Label(Subtitle(), 11, UI.Secondary));
+        subtitle = UI.Label(Subtitle(), 11, UI.Secondary);
+        meta.Children.Add(subtitle);
         texts.Children.Add(meta);
         Grid.SetColumn(texts, 1);
         grid.Children.Add(texts);
 
+        var trailing = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        trailing.Children.Add(side);
         if (index is >= 0 and < 9)
         {
             hint = UI.Label($"Ctrl+{index + 1}", 11, UI.Tertiary, FontWeights.Medium);
             hint.Margin = new Thickness(6, 0, 0, 0);
             hint.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(hint, 2);
-            grid.Children.Add(hint);
+            trailing.Children.Add(hint);
         }
+        Grid.SetColumn(trailing, 2);
+        grid.Children.Add(trailing);
         Child = grid;
         Selected = isSelected;
 
@@ -996,13 +1039,18 @@ sealed class Row : Border
             down = null;
             model.Pick(clip, !Keyboard.Modifiers.HasFlag(ModifierKeys.Alt));
         };
-        // Built on first right-click: making a menu for every row up front costs more than the rows themselves.
+        // Built on each right-click: what it offers depends on transfers and links at that moment.
         ContextMenu = UI.Menu();
-        ContextMenuOpening += (_, _) => { if (ContextMenu.Items.Count == 0) Fill(ContextMenu); };
+        ContextMenuOpening += (_, _) => { ContextMenu.Items.Clear(); Fill(ContextMenu); };
+        UpdateTransfer();
 
-        // Panel rows follow the keyboard selection; peek rows (index -1) are never selected.
+        // Panel rows follow the keyboard selection and transfers; peek rows (index -1) are never selected.
         if (index < 0) return;
-        Action<Change> follow = what => { if (what == Change.Selection) Selected = clip.Id == model.Selection; };
+        Action<Change> follow = what =>
+        {
+            if (what == Change.Selection) Selected = clip.Id == model.Selection;
+            else if (what == Change.Transfers) UpdateTransfer();
+        };
         Loaded += (_, _) => model.Changed += follow;
         Unloaded += (_, _) => model.Changed -= follow;
     }
@@ -1017,12 +1065,50 @@ sealed class Row : Border
         }
     }
 
+    /// A synced item still on another machine gets a Get button; one moving shows its progress and a stop button.
+    void UpdateTransfer()
+    {
+        side.Children.Clear();
+        subtitle.Text = Subtitle();
+        if (model.Transfers.TryGetValue(clip.Hash, out var t))
+        {
+            side.Children.Add(new ProgressBar { Width = 44, Height = 4, Value = t.Fraction, Maximum = 1, VerticalAlignment = VerticalAlignment.Center, Foreground = UI.AccentBrush, Background = UI.White(0.1), BorderThickness = new Thickness(0) });
+            var stop = UI.Icon(UI.Close, 10, UI.Secondary);
+            stop.Margin = new Thickness(6, 0, 0, 0);
+            stop.Cursor = Cursors.Hand;
+            stop.ToolTip = "Stop";
+            stop.MouseLeftButtonUp += (_, e) => { e.Handled = true; model.Sync?.CancelTransfer(clip.Hash); };
+            side.Children.Add(stop);
+        }
+        else if (clip.Remote)
+        {
+            var get = new Border { CornerRadius = new CornerRadius(5), Background = UI.White(0.1), Padding = new Thickness(8, 2, 8, 2), Cursor = Cursors.Hand, ToolTip = "Download it from the other machine" };
+            get.Child = UI.Label("Get", 11, UI.Primary, FontWeights.Medium);
+            get.MouseLeftButtonUp += (_, e) => { e.Handled = true; model.Sync?.Get(clip.Hash); };
+            side.Children.Add(get);
+        }
+    }
+
+    string DeviceName => model.Devices.TryGetValue(clip.Origin, out var n) ? n : "other machine";
+
     void Fill(ContextMenu menu)
     {
         void Add(string title, Action act) { var item = new MenuItem { Header = title }; item.Click += (_, _) => act(); menu.Items.Add(item); }
-        Add("Paste", () => model.Pick(clip, true));
-        Add("Copy", () => model.Pick(clip, false));
-        if ((clip.ImagePath ?? clip.Paths.FirstOrDefault()) is { } p)
+        var moving = model.Transfers.ContainsKey(clip.Hash);
+        if (clip.Remote)
+        {
+            if (!moving) Add("Get from " + DeviceName, () => model.Sync?.Get(clip.Hash));
+        }
+        else
+        {
+            Add("Paste", () => model.Pick(clip, true));
+            Add("Copy", () => model.Pick(clip, false));
+            if (clip.Kind != ClipKind.Text && !moving && model.Sync != null)
+                foreach (var peer in model.Sync.Linked)
+                    Add("Send to " + peer.Name, () => model.Sync.SendTo(clip.Hash, peer.Device));
+        }
+        if (moving) Add("Stop transfer", () => model.Sync?.CancelTransfer(clip.Hash));
+        if (!clip.Remote && (clip.ImagePath ?? clip.Paths.FirstOrDefault()) is { } p)
         {
             Add("Open", () => { try { Process.Start(new ProcessStartInfo(p) { UseShellExecute = true }); } catch (Win32Exception) { } });
             Add("Show in File Explorer", () => Process.Start("explorer.exe", $"/select,\"{p}\""));
@@ -1045,7 +1131,10 @@ sealed class Row : Border
         return image;
     }
 
-    string FirstLine => clip.Text.Split('\n', '\r').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+    /// Only the start of the text matters for a row, so long copies don't slow the list.
+    string Head => Store.Head(clip.Text, 20_000);
+
+    string FirstLine => Head.Split('\n', '\r').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
 
     string Title()
     {
@@ -1064,19 +1153,24 @@ sealed class Row : Border
 
     string Subtitle()
     {
+        if (model.Transfers.TryGetValue(clip.Hash, out var t))
+            return $"{(t.Sending ? "Sending to" : "Getting from")} {t.Peer} · {UI.Size(t.Done)} of {UI.Size(t.Total)}";
         var parts = new List<string> { clip.Source, UI.Ago(clip.Created) };
-        if (clip.Kind == ClipKind.File && clip.Paths.FirstOrDefault() is { } p) parts.Add(UI.Tilde(Path.GetDirectoryName(p) ?? ""));
+        if (clip.Origin.Length > 0) parts.Insert(0, DeviceName);
+        if (clip.Remote) parts.Add("not downloaded yet");
+        else if (clip.Kind == ClipKind.File && clip.Paths.FirstOrDefault() is { } p) parts.Add(UI.Tilde(Path.GetDirectoryName(p) ?? ""));
         else if (clip.Kind == ClipKind.Text)
         {
-            var lines = clip.Text.Split('\n').Count(l => l.Trim('\r').Length > 0);
-            if (lines > 1) parts.Add($"{lines} lines");
+            var head = Head;
+            var lines = head.Split('\n').Count(l => l.Trim('\r').Length > 0);
+            if (lines > 1) parts.Add(clip.Text.Length > head.Length ? $"{lines}+ lines" : $"{lines} lines");
         }
         return string.Join(" · ", parts);
     }
 
     DataObject DragData()
     {
-        if ((clip.ImagePath ?? clip.Paths.FirstOrDefault()) is { } p && File.Exists(p))
+        if (!clip.Remote && (clip.ImagePath ?? clip.Paths.FirstOrDefault()) is { } p && File.Exists(p))
         {
             var data = new DataObject();
             data.SetFileDropList(new System.Collections.Specialized.StringCollection { p });
@@ -1344,6 +1438,10 @@ sealed class PanelView : Grid
 /// Ctrl+Y: the selected item at full size.
 sealed class PreviewPane : Border
 {
+    /// Laying out megabytes of text would freeze the panel; the full text still pastes.
+    static string Shown(string text) =>
+        text.Length > 100_000 ? Store.Head(text, 100_000) + "\n\n… the rest is too long to preview, but it pastes in full" : text;
+
     public PreviewPane(Clip clip)
     {
         Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0E, 0x0D));
@@ -1363,14 +1461,13 @@ sealed class PreviewPane : Border
         }
         else
         {
-            Child = new ScrollViewer
+            // The text box scrolls itself: inside a separate scroller it lays out far more than fits on screen
+            // (a 100,000-character preview took about 0.5 s to appear, now about 0.2 s).
+            Child = new TextBox
             {
+                Text = Shown(clip.Text), IsReadOnly = true, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Foreground = UI.Primary,
+                FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 12, TextWrapping = TextWrapping.Wrap, Padding = new Thickness(14),
                 VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
-                Content = new TextBox
-                {
-                    Text = clip.Text, IsReadOnly = true, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Foreground = UI.Primary,
-                    FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 12, TextWrapping = TextWrapping.Wrap, Padding = new Thickness(14),
-                },
             };
         }
     }
@@ -1459,7 +1556,7 @@ sealed class SettingsView : Grid
         // Like the Mac's 2 s refresh: notices folders appearing or becoming readable, without rebuilding
         // (and so interrupting) the controls when nothing changed.
         ticker.Tick += (_, _) => { if (Folders() != shown) Render(); };
-        Action<Change> changed = what => { if (what is Change.Prefs or Change.Mascot) Render(); };
+        Action<Change> changed = what => { if (what is Change.Prefs or Change.Mascot or Change.Sync) Render(); };
         Loaded += (_, _) => { ticker.Start(); model.Changed += changed; Keyboard.Focus(this); };
         Unloaded += (_, _) => { ticker.Stop(); model.Changed -= changed; };
     }
@@ -1502,6 +1599,8 @@ sealed class SettingsView : Grid
         folders.Children.Add(Row(UI.Keyboard, "Auto-paste", "Enter pastes into the app you were in. Apps running as administrator just get a copy.",
             Switch(Prefs.Get("autoPaste", true), on => Save(() => Prefs.Set("autoPaste", on)))));
         folders.Children.Add(Row(UI.Keyboard, "Open ClipBubble", null, HotkeyBox()));
+
+        RenderSync();
 
         var mascots = Section("Mascot");
         var grid = new WrapPanel { Width = 7 * 50 };
@@ -1550,6 +1649,43 @@ sealed class SettingsView : Grid
         quit.HorizontalAlignment = HorizontalAlignment.Right;
         buttons.Children.Add(quit);
         general.Children.Add(buttons);
+    }
+
+    /// Hosts from ~/.ssh/config, each with a switch and how its link is doing.
+    void RenderSync()
+    {
+        var sync = Section("Sync over SSH");
+        sync.Children.Add(Note("Copy on one PC, paste on another, using your SSH config and keys.", top: 0));
+        var enabled = new HashSet<string>(Engine.Hosts);
+        var paused = Engine.Paused;
+        var hosts = Engine.SshHosts();
+        if (hosts.Count == 0) sync.Children.Add(Note("No hosts in ~\\.ssh\\config yet. Machines that link to this one show up by themselves.", top: 4));
+        foreach (var h in hosts)
+        {
+            var state = paused && enabled.Contains(h) ? "Paused" : model.Sync?.Statuses.TryGetValue(h, out var st) == true ? st!.Text : null;
+            sync.Children.Add(Row(UI.Network, h, state, Switch(enabled.Contains(h), on => Save(() => SetHost(h, on)))));
+        }
+        sync.Children.Add(Row(UI.Pause, "Pause sync", null, Switch(paused, on => Save(() => SetPaused(on)))));
+        var linked = model.Sync?.Linked.Select(p => p.Name).ToList() ?? new List<string>();
+        sync.Children.Add(Note($"This PC shows up as {model.Sync?.Name ?? Environment.MachineName}." +
+            (linked.Count > 0 ? $" Linked now: {string.Join(", ", linked)}." : "") + " Files up to 25 MB move on their own."));
+    }
+
+    void SetHost(string host, bool on)
+    {
+        Prefs.Set("sync.hosts", Engine.Hosts.Where(x => x != host).Concat(on ? new[] { host } : Array.Empty<string>()).ToArray());
+        model.Sync?.Post(model.Sync.ReconcileLinks);
+    }
+
+    void SetPaused(bool on)
+    {
+        Prefs.Set("sync.paused", on);
+        if (model.Sync is not { } sync) return;
+        sync.Post(() =>
+        {
+            if (on) foreach (var s in sync.Sessions.ToList()) s.Close();
+            sync.ReconcileLinks();
+        });
     }
 
     StackPanel Section(string title)
@@ -1774,7 +1910,7 @@ sealed class SettingsView : Grid
 
     void ClearAll()
     {
-        if (!app.Modal(() => Alert.Show(app.PanelWindow, "Clear all clipboard history?", "This removes every saved item and image. It can't be undone.", "Clear"))) return;
+        if (!app.Modal(() => Alert.Show(app.PanelWindow, "Clear all clipboard history?", "This removes every saved item and image, here and on your linked machines. It can't be undone.", "Clear"))) return;
         model.ClearAll();
     }
 }
@@ -1785,6 +1921,8 @@ sealed class App : Application
 {
     const double IdleAlpha = 0.4, Margin = 10;
     readonly Model model = new();
+    /// Tests make an App only to host Settings. WPF still starts it on the first dispatcher pump; this keeps the bubble, capture and sync from starting.
+    public bool Headless { get; init; }
     FloatingWindow bubble = null!, panel = null!, peek = null!;
     BubbleView face = null!;
     Capture capture = null!;
@@ -1807,6 +1945,7 @@ sealed class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (Headless) return;
         // A bug in one handler shouldn't make the bubble disappear: it's logged and the app carries on.
         DispatcherUnhandledException += (_, x) => { Log.Error(x.Exception); x.Handled = true; };
         AppDomain.CurrentDomain.UnhandledException += (_, x) => { if (x.ExceptionObject is Exception ex) Log.Error(ex); };
@@ -1821,6 +1960,7 @@ sealed class App : Application
         face.HitArea.MouseLeftButtonDown += BubbleDown;
         face.HitArea.MouseMove += BubbleDrag;
         face.HitArea.MouseLeftButtonUp += BubbleUp;
+        face.Pressed = Toggle;
         bubble.Show();
         Snap(animated: false);
 
@@ -1839,6 +1979,7 @@ sealed class App : Application
         model.ShowError = (title, reason) => Modal(() => Alert.Show(panel, title, reason, "OK", cancel: null));
 
         capture = new Capture(model.Writer, Captured);
+        StartSync();
         SyncScreenshots();
         SyncDownloads();
         ImportFolders();
@@ -1853,6 +1994,31 @@ sealed class App : Application
         // Mascot changes from the MCP server (another process) and second launches land here.
         Listen(Mascots.ChangedEvent, () => { model.LoadMascots(); Captured(pulseOnly: true); });
         Listen(Program.OpenEvent, () => { if (!panel.IsVisible) ShowPanel(); });
+    }
+
+    int receivedPending;
+
+    /// Links with ClipBubble on the hosts the user switched on, and lets other machines link here.
+    void StartSync()
+    {
+        Engine.Downloads = () => Environment.GetEnvironmentVariable("CLIPBUBBLE_DOWNLOADS") is { Length: > 0 } d ? d
+            : FolderWatcher.DownloadsFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+        var sync = new Engine();
+        model.Sync = sync;
+        sync.Apply = c => Dispatcher.BeginInvoke(new Action(() => ApplySynced(c)));
+        // Many items arrive at once when a link first reconciles: one refresh covers them all.
+        sync.Received = () => { if (Interlocked.Exchange(ref receivedPending, 1) == 0) Dispatcher.BeginInvoke(new Action(() => { receivedPending = 0; Captured(); })); };
+        sync.Status = () => Dispatcher.BeginInvoke(new Action(model.SyncChanged));
+        sync.Transfers = t => Dispatcher.BeginInvoke(new Action(() => model.SetTransfers(t)));
+        Microsoft.Win32.SystemEvents.PowerModeChanged += (_, x) => { if (x.Mode == Microsoft.Win32.PowerModes.Resume) sync.Redial(); };
+        sync.Start();
+    }
+
+    /// A fresh copy from another machine goes on this clipboard. Capture then sees it as ours and leaves history alone.
+    void ApplySynced(Clip c)
+    {
+        Recorder.Expect(Recorder.CaptureHash(c), null);
+        if (Board.Write(c) is { } why) SyncLog.Write($"couldn't put {c.Hash.Substring(0, Math.Min(10, c.Hash.Length))} on the clipboard: {why}");
     }
 
     void Listen(string name, Action act)
@@ -2001,9 +2167,11 @@ sealed class App : Application
     /// so it also reruns later.
     void ImportFolders()
     {
+        // On the writer, each import first moves 1.3.0's list in; while that can't be done, nothing is imported.
+        bool Ready() => model.Writer.Db.ImportLegacyForgotten(new[] { FolderWatcher.ScreenshotFolder, FolderWatcher.DownloadsFolder });
         foreach (var (watcher, source) in new[] { (screenshots, "Screenshot"), (downloads, "Downloads") })
             if (watcher != null)
-                capture.AddFiles(source, () => Forgotten.Load() is { } gone ? watcher.Existing(7).Where(f => !gone.Has(f.Path, f.Added)) : [], model.Refresh);
+                capture.AddFiles(source, () => Ready() ? watcher.Existing(7) : [], model.Refresh);
     }
 
     // MARK: Picking
@@ -2012,7 +2180,10 @@ sealed class App : Application
     /// the clipboard, it says why instead of pasting whatever was there before.
     async void Pick(Clip c, bool paste)
     {
+        if (c.Remote) { model.Sync?.Get(c.Hash); return; }
         var target = panel.IsVisible ? pasteTarget : Win.GetForegroundWindow();
+        // Files that came from another machine go on with their paths here: that copy still moves this item up.
+        Recorder.Expect(Recorder.CaptureHash(c), c.Hash);
         if (Board.Write(c) is { } why) { model.ShowError("Couldn't copy that", why); return; }
         var copied = Win.GetClipboardSequenceNumber();
         HidePanel();
@@ -2158,7 +2329,7 @@ sealed class App : Application
         pressed = false;
         RefreshMood();
         if (moved) { dragging = false; Snap(animated: true); }
-        else Toggle();
+        else face.Pressed();
     }
 
     void SetBubbleHover(bool on)

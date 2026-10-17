@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Media;
@@ -46,6 +47,7 @@ static class Program
     static void Reset()
     {
         using (var db = new Db()) db.DeleteAll();
+        Sql.Exec(Paths.Db, "DELETE FROM forgotten");   // the deletes above are remembered for sync; each test starts clean
         foreach (var c in Prefs.Categories) Prefs.SetOn(c.Key, true);
         File.Delete(Path.Combine(Paths.Dir, "forgotten.json"));
         if (Directory.Exists(Mascots.Dir)) Directory.Delete(Mascots.Dir, true);
@@ -59,11 +61,16 @@ static class Program
         ("schema matches the Mac app", () =>
         {
             using (new Db()) { }
-            var sql = Sql.Query(Paths.Db, "SELECT sql FROM sqlite_master WHERE name IN ('clips','clips_created') ORDER BY name");
+            var sql = Sql.Query(Paths.Db, "SELECT sql FROM sqlite_master WHERE name IN ('clips','clips_created','forgotten') ORDER BY name");
             Check(Squash(sql[0]) == Squash(@"CREATE TABLE clips(
               id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
-              file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL)"), "clips table: " + sql[0]);
+              file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL,
+              origin TEXT NOT NULL DEFAULT '', remote INTEGER NOT NULL DEFAULT 0)"), "clips table: " + sql[0]);
             Check(Squash(sql[1]) == Squash("CREATE INDEX clips_created ON clips(created)"), "index: " + sql[1]);
+            Check(Squash(sql[2]) == Squash("CREATE TABLE forgotten(hash TEXT PRIMARY KEY, at REAL NOT NULL)"), "forgotten table: " + sql[2]);
+            var devices = Sql.Query(Paths.Db, "SELECT sql FROM sqlite_master WHERE name = 'devices'");
+            Check(Squash(devices[0]) == Squash("CREATE TABLE devices(id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT NOT NULL DEFAULT '')"), "devices: " + devices[0]);
+            Check(Sql.Query(Paths.Db, "PRAGMA user_version")[0] == "1", "user_version 1");
             Check(Sql.Query(Paths.Db, "PRAGMA journal_mode")[0] == "wal", "WAL mode");
         }),
 
@@ -212,6 +219,7 @@ static class Program
                 try { db.Delete(clip.Id); } catch (InvalidOperationException) { }
             }
             Check(db.Clips().Count == 1 && File.Exists(clip.File!), "row and its image are both still there");
+            Check(Sql.Query(Paths.Db, "SELECT count(*) FROM forgotten")[0] == "0", "and nothing half-remembered");
         }),
 
         ("app names that are really file names read like names", () =>
@@ -378,6 +386,7 @@ static class Program
             Check(db.Clips().Count == 1, "file first: one row");
 
             db.DeleteAll();
+            Sql.Exec(Paths.Db, "DELETE FROM forgotten");   // Clear all would keep the screenshot out from now on
             r = new Recorder(new Db());
             r.Record(new Snapshot(Array.Empty<string>(), null, reencoded, null), "Snipping Tool", DateTime.Now);
             r.AddFile(shot, "Screenshot", DateTime.Now);
@@ -612,31 +621,45 @@ static class Program
             Check(img != null && img.PixelWidth <= 102 && img.PixelHeight <= 51, $"decoded at {img?.PixelWidth}x{img?.PixelHeight} to show at 34 px");
         }),
 
-        ("removed screenshots and downloads stay out of history", () =>
+        ("removed screenshots and downloads stay out of history, like on the Mac", () =>
         {
             var shot = Path.Combine(Paths.Dir, "Screenshot 2.png");
             var download = Path.Combine(Paths.Dir, "report.pdf");
+            var copied = Path.Combine(Paths.Dir, "notes.txt");
             File.WriteAllBytes(shot, TinyPng());
             File.WriteAllText(download, "%PDF");
-            using (var db = new Db())
+            File.WriteAllText(copied, "x");
+            using var db = new Db();
+            // Like the folder import: each file comes in with when it was saved.
+            void Import()
             {
-                db.InsertIfMissing(ClipKind.File, shot, "Screenshot", "f:" + Store.Sha(shot), DateTime.Now);
-                db.InsertIfMissing(ClipKind.File, download, "Downloads", "f:" + Store.Sha(download), DateTime.Now);
+                db.InsertIfMissing(ClipKind.File, shot, "Screenshot", "f:" + Store.Sha(shot), File.GetCreationTime(shot));
+                db.InsertIfMissing(ClipKind.File, download, "Downloads", "f:" + Store.Sha(download), File.GetCreationTime(download));
             }
+            Import();
+            db.Upsert(ClipKind.File, copied, null, "File Explorer", "f:" + Store.Sha(copied));
             var model = new Model();
             model.Refresh();
             model.Delete(model.Clips.Single(c => c.Source == "Screenshot"));
+            model.Delete(model.Clips.Single(c => c.Source == "File Explorer"));
             Snapshots.Pump(0.5);
-            var gone = Forgotten.Load()!;
-            Check(gone.Has(shot, DateTime.Now.AddMinutes(-1)) && !gone.Has(download, DateTime.Now.AddMinutes(-1)), "the removed screenshot is skipped, the download isn't");
-            Check(!gone.Has(shot, DateTime.Now.AddMinutes(1)), "a new file saved later at the same path still comes in");
-            Thread.Sleep(5);
-            Check(!gone.Has(shot, DateTime.Now), "even within the same second");
+            Import();
+            var sources = db.Clips().Select(c => c.Source).ToList();
+            Check(sources.SequenceEqual(new[] { "Downloads" }), "the removed screenshot isn't imported again: " + string.Join(",", sources));
+            Check(Sql.Query(Paths.Db, "SELECT count(*) FROM forgotten")[0] == "2", "every delete is remembered, so linked machines hear about it");
+            var later = Path.Combine(Paths.Dir, "Screenshot 3.png");
+            File.WriteAllBytes(later, TinyPng());
+            Sql.Exec(Paths.Db, $"INSERT INTO forgotten(hash, at) VALUES('f:{Store.Sha(later)}', {DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 60})");
+            db.InsertIfMissing(ClipKind.File, later, "Screenshot", "f:" + Store.Sha(later), File.GetCreationTime(later));
+            Check(db.Exists("f:" + Store.Sha(later)), "a new file saved at a removed path later still comes in");
+            db.Delete("f:" + Store.Sha(later));
             model.ClearAll();
             Snapshots.Pump(0.5);
-            gone = Forgotten.Load()!;
-            Check(gone.Has(download, DateTime.Now.AddMinutes(-1)), "after Clear all, files from before it are skipped");
-            Check(!gone.Has(Path.Combine(Paths.Dir, "new.png"), DateTime.Now.AddMinutes(1)), "files added later still come in");
+            Import();
+            Check(db.Clips().Count == 0, "after Clear all, neither comes back");
+            Sql.Exec(Paths.Db, $"UPDATE forgotten SET at = {DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 9 * 24 * 3600}");
+            db.Prune();
+            Check(Sql.Query(Paths.Db, "SELECT count(*) FROM forgotten")[0] == "0", "reminders older than the window plus a day are dropped");
         }),
 
         ("a folder that briefly can't be read doesn't make old files look new", () =>
@@ -770,21 +793,62 @@ static class Program
             Check(writer.Finish(TimeSpan.FromSeconds(5)) && done, "finished before returning");
         }),
 
-        ("if the removed-files list can't be saved, the screenshot isn't deleted either", () =>
+        ("ClipBubble.exe --peer relays ssh to the running app", () =>
         {
-            var shot = Path.Combine(Paths.Dir, "Screenshot 4.png");
-            File.WriteAllBytes(shot, TinyPng());
-            using (var db = new Db()) db.InsertIfMissing(ClipKind.File, shot, "Screenshot", "f:" + Store.Sha(shot), DateTime.Now);
-            var list = Path.Combine(Paths.Dir, "forgotten.json");
-            File.WriteAllText(list, "{}");
-            var model = new Model();
-            model.Refresh();
-            using (new FileStream(list, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            var exe = Path.Combine(AppContext.BaseDirectory, "ClipBubble.exe");
+            var e = new Engine("Windows test");
+            e.Start();
+            Thread.Sleep(300);
+            // Same as HostLink: keep .NET Framework from writing a byte order mark down the pipe.
+            Console.InputEncoding = new UnicodeEncoding(false, false);
+            using var p = Process.Start(new ProcessStartInfo(exe, "--peer") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            var stderr = new StringBuilder();
+            p.ErrorDataReceived += (_, x) => { if (x.Data != null) lock (stderr) stderr.AppendLine(x.Data); };
+            p.BeginErrorReadLine();
+            var frames = Codec.Encode(new Hello(SyncProto.Version, "relay-peer", "Relay", "linux", "1.4.0", Engine.Now)).Concat(Codec.Encode(new Summary(Array.Empty<Stamp>()))).ToArray();
+            p.StandardInput.BaseStream.Write(frames, 0, frames.Length);
+            p.StandardInput.BaseStream.Flush();
+            var reader = new FrameReader();
+            var got = new List<Frame>();
+            var read = new Thread(() =>
             {
-                model.Delete(model.Clips.Single());
-                Snapshots.Pump(1);
-            }
-            Check(model.Clips.Count == 1, "still in history, rather than gone now and back after the next backfill");
+                var buf = new byte[65536];
+                int n;
+                while (!got.OfType<Summary>().Any() && (n = p.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0) got.AddRange(reader.Feed(buf, n));
+            }) { IsBackground = true };
+            read.Start();
+            Check(read.Join(10_000), "the app answers through the relay (a GUI exe still gets ssh's stdio)");
+            var log = Path.Combine(Paths.Dir, "sync.log");
+            Check(got.OfType<Hello>().SingleOrDefault() is { Os: "windows", Name: "Windows test" },
+                $"its hello; got [{string.Join(", ", got.Select(f => f is Hello h ? $"hello {h.Os} {h.Name}" : f.Type.ToString()))}]"
+                + $", relay {(p.WaitForExit(1000) ? "exited " + p.ExitCode : "still running")}, stderr: {stderr.ToString().Trim()}"
+                + $", sync.log: {(File.Exists(log) ? File.ReadAllText(log).Trim() : "none")}");
+            Check(SpinWait.SpinUntil(() => e.Linked.Any(h => h.Name == "Relay"), 5000), "the app sees the peer");
+            p.StandardInput.Close();
+            Check(p.WaitForExit(10_000), "the relay exits when ssh closes");
+            Check(SpinWait.SpinUntil(() => e.Linked.Count == 0, 5000), "the app drops the session");
+        }),
+
+        ("copies from other machines don't echo into history", () =>
+        {
+            using var db = new Db();
+            var r = new Recorder(db);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            var hash = "t:" + Store.Sha("from the mac");
+            db.Insert(new Entry(hash, now - 1, "text", "from the mac", "Safari", "mac-1", Array.Empty<Blob>()), "mac-1");
+            Recorder.Expect(hash, null);
+            Check(!r.Record(Text("from the mac"), "Windows", DateTime.Now, ours: true), "the synced copy is left alone");
+            Check(db.Clips().Single().Time == now - 1 && db.Clips().Single().Source == "Safari", "not bumped or renamed");
+
+            // A synced file now lives in Downloads\ClipBubble: picking it moves that item up, not a new one.
+            var local = Path.Combine(Paths.Dir, "a.pdf");
+            File.WriteAllText(local, "%PDF");
+            db.Insert(new Entry("f:remote", now - 100, "file", "a.pdf", "Finder", "mac-1", new[] { new Blob("a.pdf", 4, "") }), "mac-1");
+            db.Received("f:remote", text: local);
+            var c = db.ByHash("f:remote")!;
+            Recorder.Expect(Recorder.CaptureHash(c), c.Hash);
+            Check(r.Record(new Snapshot(new[] { local }, null, null, null), "Windows", DateTime.Now, ours: true), "the list changes");
+            Check(db.Clips().Count == 2 && db.ByHash("f:remote")!.Time > now - 5, "the synced item moved up instead of a copy appearing");
         }),
 
         ("copying the previous item again after deleting it saves it", () =>
@@ -814,13 +878,40 @@ static class Program
             Check(seen.SequenceEqual(new[] { "new.pdf" }), "reported: " + string.Join(",", seen));
         }),
 
-        ("an unreadable removed-files list pauses the backfill instead of bringing everything back", () =>
+        ("removals saved by 1.3.0 in forgotten.json move into the shared table once", () =>
         {
-            var list = Path.Combine(Paths.Dir, "forgotten.json");
-            File.WriteAllText(list, "{\"ClearedAt\":1}");
-            using (new FileStream(list, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
-                Check(Forgotten.Load() == null, "can't read it: no list rather than an empty one");
-            Check(Forgotten.Load()?.ClearedAt == 1, "read again once it's free");
+            var downloads = Path.Combine(Paths.Dir, "legacy-downloads");
+            Directory.CreateDirectory(downloads);
+            var removed = Path.Combine(Paths.Dir, "Screenshot old.png");
+            var downloadedAgain = Path.Combine(Paths.Dir, "report.pdf");
+            File.WriteAllText(downloadedAgain, "a new copy, saved after it was removed");
+            var beforeClear = Path.Combine(downloads, "before.pdf");
+            var afterClear = Path.Combine(downloads, "after.pdf");
+            File.WriteAllText(beforeClear, "x");
+            File.WriteAllText(afterClear, "x");
+            File.SetCreationTime(beforeClear, DateTime.Now.AddHours(-2));
+            var clearedAt = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds();
+            var json = Path.Combine(Paths.Dir, "forgotten.json");
+            File.WriteAllText(json, new JavaScriptSerializer().Serialize(new { ClearedAt = clearedAt, Files = new Dictionary<string, long> { [removed] = clearedAt + 1000, [downloadedAgain] = clearedAt + 2000 } }));
+            using var db = new Db();
+            var folders = new[] { downloads, null, Path.Combine(Paths.Dir, "not there") };
+            Check(db.ImportLegacyForgotten(folders), "moved");
+            var hashes = Sql.Query(Paths.Db, "SELECT hash FROM forgotten ORDER BY hash");
+            var expected = new[] { removed, beforeClear }.Select(f => "f:" + Store.Sha(f)).OrderBy(h => h, StringComparer.Ordinal).ToList();
+            Check(hashes.SequenceEqual(expected), "the listed file and the one from before Clear all: " + hashes.Count);
+            Check(File.Exists(json), "kept while a folder isn't there (an unplugged drive), so its Clear all still applies later");
+            Directory.CreateDirectory(Path.Combine(Paths.Dir, "not there"));
+            Check(db.ImportLegacyForgotten(folders), "moved again once it is");
+            Check(!File.Exists(json), "and then the old file is gone");
+            Check(Sql.Query(Paths.Db, $"SELECT CAST(at * 1000 AS INTEGER) FROM forgotten WHERE hash = 'f:{Store.Sha(removed)}'")[0] == (clearedAt + 1000).ToString(), "kept with when it was removed");
+            Check(db.ImportLegacyForgotten(folders), "nothing left to move");
+            File.WriteAllText(json, "{}");
+            File.SetAttributes(json, FileAttributes.ReadOnly);
+            try { Check(db.ImportLegacyForgotten(folders), "a file that can be read but not deleted doesn't hold the import back"); }
+            finally { File.SetAttributes(json, FileAttributes.Normal); }
+            using (new FileStream(json, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                Check(!db.ImportLegacyForgotten(folders), "a file that can't be read yet holds the import back");
+            Check(File.Exists(json), "and is kept for next time");
         }),
 
         ("a screen recording still being saved doesn't hold up a copied picture", () =>
@@ -847,6 +938,94 @@ static class Program
             var missing = Shell.IconImage(Path.Combine(Paths.Dir, "no such folder", "x.pdf"), 64);
             Snapshots.Pump(1);
             Check(missing.Visibility == Visibility.Collapsed, "no icon: collapsed");
+        }),
+
+        ("cutting long text never splits an emoji", () =>
+        {
+            Check(Store.Head("ab\U0001F600cd", 3) == "ab", "cut before the emoji, not through it");
+            Check(Store.Head("ab\U0001F600cd", 4) == "ab\U0001F600", "or after it");
+            Check(Store.Head("short", 10) == "short", "short text is left alone");
+        }),
+
+        ("search treats % and _ as plain characters", () =>
+        {
+            using var db = new Db();
+            db.Upsert(ClipKind.Text, "50% off", null, "Notepad", "t:pct");
+            db.Upsert(ClipKind.Text, "500 apples", null, "Notepad", "t:500");
+            db.Upsert(ClipKind.Text, "my_file.txt", null, "Notepad", "t:under");
+            db.Upsert(ClipKind.Text, "myXfile.txt", null, "Notepad", "t:x");
+            db.Upsert(ClipKind.Text, @"C:\temp", null, "Notepad", "t:slash");
+            Check(db.Clips(query: "50%").Select(c => c.Text).SequenceEqual(new[] { "50% off" }), "% is a percent sign");
+            Check(db.Clips(query: "my_file").Select(c => c.Text).SequenceEqual(new[] { "my_file.txt" }), "_ is an underscore");
+            Check(db.Clips(query: @"C:\t").Select(c => c.Text).SequenceEqual(new[] { @"C:\temp" }), "a backslash is a backslash");
+        }),
+
+        ("a copy over 2 MB isn't saved; long ones show and send only their start", () =>
+        {
+            using var db = new Db();
+            var r = new Recorder(db);
+            var huge = new string('x', Recorder.MaxTextBytes + 1);
+            Check(!r.Record(Text(huge), "Notepad", DateTime.Now), "over 2 MB: skipped");
+            Check(!r.Record(Text(new string('€', 700_000)), "Notepad", DateTime.Now.AddSeconds(1)), "700,000 euro signs are 2.1 MB in UTF-8: skipped too");
+            var lines = string.Concat(Enumerable.Range(0, 30_000).Select(i => "line " + i + "\n"));
+            Check(r.Record(Text(lines), "Notepad", DateTime.Now.AddSeconds(5)), "under 2 MB: saved");
+            var clip = db.Clips().Single();
+            var row = new Row(clip, 0, isSelected: false, new Model());
+            var texts = Descendants(row).OfType<System.Windows.Controls.TextBlock>().Select(t => t.Text).ToList();
+            Check(texts.Contains("line 0") && texts.Any(t => t.EndsWith("+ lines")), "the row reads only the start: " + string.Join(" | ", texts));
+            var preview = new PreviewPane(clip);
+            var shown = Descendants(preview).OfType<System.Windows.Controls.TextBox>().Single().Text;
+            Check(shown.Length < 100_100 && shown.EndsWith("but it pastes in full"), $"the preview shows the start ({shown.Length} characters)");
+            var got = (string)((Dictionary<string, object>)((System.Collections.IList)ClipBubble.Mcp.Call(db, "clipboard_get", new Dictionary<string, object?> { ["id"] = clip.Id })["content"])[0])["text"];
+            Check(got.Length < 200_200 && got.EndsWith($"(cut: {lines.Length} characters in all)"), $"clipboard_get sends the start ({got.Length} characters)");
+        }),
+
+        ("a failed mascot import leaves nothing behind", () =>
+        {
+            string Err(Action a) { try { a(); return ""; } catch (MascotException e) { return e.Message; } }
+            var missing = Path.Combine(Paths.Dir, "nowhere.png");
+            Check(Err(() => Mascots.Add("Half", "image", null, new() { ["idle"] = Svg, ["hover"] = missing })) == $"couldn't read the hover image at {missing}", "says which image");
+            Check(!Directory.EnumerateFiles(Mascots.Dir, "half*").Any(), "the idle SVG it already saved is gone too");
+            var leftover = Path.Combine(Mascots.Dir, "fox-idle.png");
+            File.WriteAllBytes(leftover, TinyPng());
+            Err(() => Mascots.Add("Fox", "image", null, new() { ["idle"] = leftover, ["hover"] = missing }));
+            Check(File.Exists(leftover), "an image that was already in the mascot folder is never deleted");
+            var other = Path.Combine(Mascots.Dir, "owl-idle.png");
+            File.WriteAllBytes(other, TinyPng());
+            Err(() => Mascots.Add("Owl", "image", null, new() { ["idle"] = missing }));
+            Check(File.Exists(other), "not even when a different image fails to copy over it");
+        }),
+
+        ("screen readers see the bubble as a ClipBubble button they can press", () =>
+        {
+            var bubble = new BubbleView(new Model());
+            var pressed = 0;
+            bubble.Pressed = () => pressed++;
+            var peer = System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(bubble);
+            Check(peer.GetName() == "ClipBubble" && peer.GetAutomationControlType() == System.Windows.Automation.Peers.AutomationControlType.Button, $"{peer.GetName()} / {peer.GetAutomationControlType()}");
+            Check(peer.GetHelpText() == "Opens your clipboard history", "help text");
+            ((System.Windows.Automation.Provider.IInvokeProvider)peer.GetPattern(System.Windows.Automation.Peers.PatternInterface.Invoke)).Invoke();
+            Check(pressed == 1, "pressing it does what a click does");
+        }),
+
+        ("a screenshot folder that's renamed and made again is watched again", () =>
+        {
+            var folder = Path.Combine(Paths.Dir, "renamed-" + Guid.NewGuid().ToString("N").Substring(0, 6));
+            Directory.CreateDirectory(folder);
+            var seen = new List<string>();
+            using var watcher = new FolderWatcher(folder, null, _ => true, (path, _) => seen.Add(Path.GetFileName(path)));
+            Directory.Move(folder, folder + "-old");
+            Directory.CreateDirectory(folder);
+            var restored = Path.Combine(folder, "restored.pdf");   // brought back by a sync tool, say: not new
+            File.WriteAllText(restored, "x");
+            File.SetCreationTime(restored, DateTime.Now.AddDays(-2));
+            Thread.Sleep(50);
+            Snapshots.Pump(6);   // checked every 5 s
+            File.WriteAllText(Path.Combine(folder, "new.png"), "x");
+            for (var i = 0; i < 20 && seen.Count == 0; i++) Snapshots.Pump(0.5);   // the check runs off the UI thread: give a busy runner time
+            Check(seen.SequenceEqual(new[] { "new.png" }), "reported: " + string.Join(",", seen)
+                + $"; same creation time as the renamed one: {Directory.GetCreationTimeUtc(folder) == Directory.GetCreationTimeUtc(folder + "-old")}"
+                + $", thread pool answers: {Task.Run(() => 1).Wait(2000)}");
         }),
 
         ("MCP over stdio from the real exe: tools, history, image, mascots", Mcp),
@@ -883,6 +1062,13 @@ static class Program
             stdin.WriteLine("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
             stdin.WriteLine("[1,2]");
             stdin.WriteLine("\"not an object\"");
+            stdin.WriteLine("   ");
+            stdin.WriteLine("null");
+            for (var i = 0; i < 3; i++)
+            {
+                var reply = json.Deserialize<Dictionary<string, object>>(p.StandardOutput.ReadLine() ?? throw new Exception("server closed"));
+                Check(reply.ContainsKey("id") && reply["id"] == null && (int)((Dictionary<string, object>)reply["error"])["code"] == -32700, "parse error for a line that isn't a JSON object");
+            }
             var init = Call("initialize", new { protocolVersion = "2025-06-18" });
             Check((string)((Dictionary<string, object>)init["serverInfo"])["name"] == "clipbubble", "server name");
             var tools = List(Call("tools/list")["tools"]).Select(t => (string)((Dictionary<string, object>)t)["name"]).ToArray();
@@ -956,7 +1142,7 @@ static class Program
     }
 
     /// Settings needs an App for its shortcut label; WPF allows one per process. Closing a test window mustn't end it.
-    static readonly Lazy<App> TestApp = new(() => new App { ShutdownMode = ShutdownMode.OnExplicitShutdown });
+    static readonly Lazy<App> TestApp = new(() => new App { ShutdownMode = ShutdownMode.OnExplicitShutdown, Headless = true });
 
     static IEnumerable<DependencyObject> Descendants(DependencyObject root) =>
         LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>().SelectMany(c => new[] { c }.Concat(Descendants(c)));

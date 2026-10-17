@@ -13,6 +13,12 @@ final class Capture {
     private var timer: DispatchSourceTimer?
     private let onChange: () -> Void
 
+    /// The pasteboard change sync made when it put another device's copy there. Capturing it again would bounce it back.
+    private static let skipLock = NSLock()
+    private static var skipCount = -1
+    static func ignoreChange(_ changeCount: Int) { skipLock.lock(); skipCount = changeCount; skipLock.unlock() }
+    private static func isSyncWrite(_ changeCount: Int) -> Bool { skipLock.lock(); defer { skipLock.unlock() }; return changeCount == skipCount }
+
     /// Password managers and other tools mark secrets and throwaway copies with these; never record them.
     private static let skipTypes: Set<String> = [
         "org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType",
@@ -39,6 +45,7 @@ final class Capture {
         if pb.changeCount != seenCount { seenCount = pb.changeCount; seenAt = now; return }
         guard seenCount != count, now.timeIntervalSince(seenAt) >= 0.6 else { return }
         count = seenCount
+        if Self.isSyncWrite(count) { return }
         let types = Set((pb.types ?? []).map(\.rawValue))
         guard !types.isEmpty, types.isDisjoint(with: Self.skipTypes), let clip = read(pb) else { return }
         // The same copy again is a no-op, unless it was deleted from history in between.

@@ -150,6 +150,16 @@ sealed class Capture : IDisposable
 /// Runs on one background thread at a time.
 sealed class Recorder(Db db)
 {
+    /// Copies ClipBubble is about to make, by the hash capture will see: null leaves history alone (a copy synced from
+    /// another machine is already there), a hash moves that item up instead (a synced file, now at a path here).
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string? MoveUp, DateTime At)> expected = new();
+
+    public static void Expect(string captured, string? moveUp) => expected[captured] = (moveUp, DateTime.UtcNow);
+
+    /// The hash capture gives a clip once Board.Write has put it on the clipboard.
+    public static string CaptureHash(Clip c) =>
+        c.Kind == ClipKind.File ? "f:" + Store.Sha(string.Join("\n", c.Paths.Where(p => File.Exists(p) || Directory.Exists(p)))) : c.Hash;
+
     /// The latest capture and the one before it, to spot tools that paste through the clipboard.
     (string Hash, DateTime At, bool Inserted)? last;
     string? previousHash;
@@ -166,6 +176,12 @@ sealed class Recorder(Db db)
     public bool Record(Snapshot s, string source, DateTime now, bool ours = false)
     {
         if (Classify(s) is not { } clip) return false;
+        if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5 && e.MoveUp != clip.Hash)
+        {
+            if (e.MoveUp == null) return false;
+            db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+            return true;
+        }
         if (clip.Hash == last?.Hash && db.Exists(clip.Hash)) return false;   // copied again after a delete: save it again
         var category = clip.Kind switch { ClipKind.Image => "images", ClipKind.File => "files", _ => "text" };
         if (!Prefs.On(category)) return false;
@@ -202,6 +218,9 @@ sealed class Recorder(Db db)
 
     record Classified(ClipKind Kind, string Text, string Hash, byte[]? Png);
 
+    /// Text bigger than this (a log dump, a database export) isn't kept: it would slow every list and search.
+    public const int MaxTextBytes = 2_000_000;
+
     /// Same order as the Mac: files, then an image unless there's real text alongside it, then text.
     static Classified? Classify(Snapshot s)
     {
@@ -214,7 +233,7 @@ sealed class Recorder(Db db)
         }
         if ((trimmed.Length == 0 || looksLikeUrl) && (s.Png ?? DibToPng(s.Dib)) is { } png)
             return new(ClipKind.Image, "", "i:" + Store.Sha(png), png);
-        if (trimmed.Length > 0) return new(ClipKind.Text, s.Text!, "t:" + Store.Sha(s.Text!), null);
+        if (trimmed.Length > 0 && Encoding.UTF8.GetByteCount(s.Text!) <= MaxTextBytes) return new(ClipKind.Text, s.Text!, "t:" + Store.Sha(s.Text!), null);
         return null;
     }
 
@@ -345,12 +364,17 @@ sealed class FolderWatcher : IDisposable
     readonly double? maxAge;
     readonly Action<string, DateTime> onNew;
     readonly DispatcherTimer debounce = new() { Interval = TimeSpan.FromSeconds(0.4) };
-    readonly DispatcherTimer retry = new() { Interval = TimeSpan.FromSeconds(5) };
-    /// Null until the folder could be listed once. Until then only files created after the watcher started count as new,
+    /// Every 5 s: starts watching once the folder exists, and again if it was renamed or replaced, because Windows
+    /// keeps watching a renamed folder under its new name and says nothing.
+    readonly DispatcherTimer check = new() { Interval = TimeSpan.FromSeconds(5) };
+    DateTime watchedCreated;
+    /// Null until the folder could be listed once. Until then only files created after `since` count as new,
     /// so a folder that appears later (Snipping Tool's first save) reports its new screenshot, while one that was
     /// missing or unreadable for a while (an unplugged drive) doesn't report everything already in it.
     HashSet<string>? known;
-    readonly DateTime started = DateTime.Now;
+    /// Files created after this count as new while `known` is null: when the watcher started, and later the last time
+    /// the 5 s check saw the folder fine (so a folder restored days later doesn't announce what was already there).
+    DateTime since = DateTime.Now;
     FileSystemWatcher? watcher;
     bool stopped;
 
@@ -362,7 +386,7 @@ sealed class FolderWatcher : IDisposable
         this.include = include;
         this.onNew = onNew;
         debounce.Tick += (_, _) => { debounce.Stop(); Scan(); };
-        retry.Tick += (_, _) => Start();
+        check.Tick += (_, _) => Check();
         if (Listing() is { } now) known = new(now);
         Start();
     }
@@ -370,28 +394,77 @@ sealed class FolderWatcher : IDisposable
     public void Dispose()
     {
         stopped = true;
-        retry.Stop();
+        check.Stop();
         debounce.Stop();
         watcher?.Dispose();
         watcher = null;
     }
 
-    /// Retries until the folder exists (Snipping Tool creates Screenshots on the first save). Each (re)start ends with
+    /// Waits until the folder exists (Snipping Tool creates Screenshots on the first save). Each (re)start ends with
     /// a scan against what was known before, so files that arrived while the folder was missing or the watcher was
     /// down still count as new.
     void Start()
     {
-        retry.Stop();
         if (stopped) return;
-        if (!Directory.Exists(Folder)) { retry.Start(); return; }
+        check.Start();
+        if (!Directory.Exists(Folder)) return;
+        // A different folder than last time (renamed and made again, deleted and restored): its files aren't new,
+        // except ones made since it was last seen fine. A date that can't be read is taken as the same folder.
+        var created = Created(Folder);
+        if (watchedCreated != default && created != DateTime.MinValue && created != watchedCreated) known = null;
+        if (created != DateTime.MinValue) watchedCreated = created;
         var dispatcher = Dispatcher.CurrentDispatcher;
-        watcher = new FileSystemWatcher(Folder) { NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName, IncludeSubdirectories = false };
+        var w = new FileSystemWatcher(Folder) { NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName, IncludeSubdirectories = false };
         FileSystemEventHandler changed = (_, _) => dispatcher.BeginInvoke(new Action(() => { debounce.Stop(); debounce.Start(); }));
-        watcher.Created += changed;
-        watcher.Renamed += (s, e) => changed(s, e);
-        watcher.Error += (_, _) => dispatcher.BeginInvoke(new Action(() => { watcher?.Dispose(); watcher = null; Start(); }));
-        watcher.EnableRaisingEvents = true;
+        w.Created += changed;
+        w.Renamed += (s, e) => changed(s, e);
+        w.Error += (_, _) => dispatcher.BeginInvoke(new Action(Restart));   // e.g. the folder was deleted
+        try { w.EnableRaisingEvents = true; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            w.Dispose();   // no access yet: the next check tries again
+            return;
+        }
+        watcher = w;
         Scan();
+    }
+
+    bool checking;
+
+    /// Off the UI thread: a folder on a network drive that stopped answering can take seconds to look at.
+    void Check()
+    {
+        if (checking) return;
+        checking = true;
+        var (dispatcher, watching, created, probed) = (Dispatcher.CurrentDispatcher, watcher != null, watchedCreated, DateTime.Now);
+        Task.Run(() =>
+        {
+            var exists = Directory.Exists(Folder);
+            var now = exists ? Created(Folder) : DateTime.MinValue;
+            var replaced = exists && now != DateTime.MinValue && created != default && now != created;
+            var restart = watching ? !exists || replaced : exists;
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                checking = false;
+                if (stopped) return;
+                if (restart) { Restart(); return; }
+                if (watching && exists) since = probed;
+                if (watchedCreated == default && now != DateTime.MinValue) watchedCreated = now;   // its date became readable
+            }));
+        });
+    }
+
+    void Restart()
+    {
+        watcher?.Dispose();
+        watcher = null;
+        Start();
+    }
+
+    static DateTime Created(string folder)
+    {
+        try { return Directory.GetCreationTimeUtc(folder); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return DateTime.MinValue; }
     }
 
     public static DateTime Added(string path)
@@ -422,7 +495,7 @@ sealed class FolderWatcher : IDisposable
     void Scan()
     {
         if (stopped || Listing() is not { } now) return;
-        var fresh = now.Where(p => known == null ? Added(p) >= started : !known.Contains(p)).ToList();
+        var fresh = now.Where(p => known == null ? Added(p) >= since : !known.Contains(p)).ToList();
         known = new HashSet<string>(now);
         DateTime? cutoff = maxAge.HasValue ? DateTime.Now.AddSeconds(-maxAge.Value) : null;
         foreach (var path in fresh.OrderBy(Added))

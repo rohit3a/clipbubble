@@ -34,7 +34,7 @@
 
 ## Install
 
-**Download:** grab `ClipBubble.zip` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), unzip it, and move `ClipBubble.app` to Applications. The app isn't notarized, so the first launch needs right-click → **Open**, or:
+**Download:** grab `ClipBubble.dmg` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), open it, and drag `ClipBubble.app` to Applications. The app isn't notarized, so the first launch needs right-click → **Open**, or:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/ClipBubble.app
@@ -57,7 +57,7 @@ git clone https://github.com/rohit3a/clipbubble && cd clipbubble && ./build.sh
 
 The Windows version lives in [`Windows/`](Windows). It's a separate C# app with the same panel, mascots, history database and MCP tools. It needs Windows 10 22H2 or Windows 11 and nothing else. It runs on the .NET Framework that ships with Windows, as one 220 KB `ClipBubble.exe`.
 
-**Download:** grab `ClipBubble-Windows.zip` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), unzip it anywhere and run `ClipBubble.exe`. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**.
+**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it anywhere and run it. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**.
 
 **Or build from source** (needs the [.NET SDK](https://dotnet.microsoft.com/download)):
 
@@ -75,6 +75,7 @@ What's different on Windows:
 - Auto-paste needs no permission. Apps running as administrator only get a copy, because Windows blocks typing into them.
 - Copies marked as secret by password managers (`ExcludeClipboardContentFromMonitorProcessing`) are never stored.
 - History lives in `%LOCALAPPDATA%\ClipBubble`.
+- Sync over SSH uses the OpenSSH client built into Windows. For other machines to link to this PC, turn on the OpenSSH Server feature and keep `ClipBubble.exe` in `%LOCALAPPDATA%\Programs\ClipBubble`, where `build.ps1` puts it.
 
 For MCP, use the path of your `ClipBubble.exe`, or copy the setup prompt from Settings:
 
