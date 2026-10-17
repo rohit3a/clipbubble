@@ -112,7 +112,7 @@ final class SyncEngine {
         sessions.append(s)
         hookChanges()
         s.start(hello: Hello(proto: Sync.proto, device: device, name: name, os: "macos", version: version,
-                             clock: Date().timeIntervalSince1970), summary: db.stamps())
+                             clock: Date().timeIntervalSince1970), summary: db.stamps(includingWaiting: false))
     }
 
     func ended(_ s: Session) {
@@ -146,7 +146,8 @@ final class SyncEngine {
         }
         guard let c = db.clip(hash: st.hash), db.allowed(kind: c.kind, source: c.source), let e = entry(c) else { return }
         s.known[st.hash] = st
-        if c.origin.isEmpty { sentAt[st.hash] = Date().timeIntervalSince1970 }
+        // Only fresh copies get acked, so only they are timed.
+        if c.origin.isEmpty, Date().timeIntervalSince(c.created) < 10 { sentAt[st.hash] = Date().timeIntervalSince1970 }
         s.send(.put(e))
     }
 
@@ -247,20 +248,22 @@ final class SyncEngine {
         // Copied seconds ago on its device, and newer than anything here: it's what you just copied, so it goes on the clipboard.
         let fresh = Date().timeIntervalSince1970 - (e.time - s.offset) < 10 && e.time > (db.clips(limit: 1).first?.created.timeIntervalSince1970 ?? 0)
         switch merge(local: db.stamp(hash: e.hash), hasRow: row != nil, incoming: st) {
-        case .ignore, .delete:
+        case .delete:
             return
+        case .ignore:
+            guard row?.remote == true else { return }
         case .bump:
             db.bump(hash: e.hash, to: e.time)
             if fresh, let c = db.clip(hash: e.hash), !c.remote { applyNow(c, to: s) }
         case .insert:
             guard db.allowed(kind: e.kind, source: e.source) else { return }
             db.insert(e, origin: e.origin == device ? "" : e.origin)
-            if e.blobs.isEmpty {
-                if fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
-            } else if e.size <= Sync.autoFetchLimit {
-                s.download(Download(hash: e.hash, kind: e.kind, names: e.blobs.map(\.name), shas: e.blobs.map(\.sha),
-                                    from: s.peer?.name ?? "Device", apply: fresh))
-            }
+            if e.blobs.isEmpty, fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
+        }
+        // Still missing its bytes, whether new here or left over from a link that dropped mid-download.
+        if !e.blobs.isEmpty, e.size <= Sync.autoFetchLimit, db.clip(hash: e.hash)?.remote == true {
+            s.download(Download(hash: e.hash, kind: e.kind, names: e.blobs.map(\.name), shas: e.blobs.map(\.sha),
+                                from: s.peer?.name ?? "Device", apply: fresh))
         }
         notifyUI()
     }
@@ -274,8 +277,7 @@ final class SyncEngine {
         if d.kind == "image" { db.received(hash: d.hash, file: d.paths.first, text: nil) }
         else { db.received(hash: d.hash, file: nil, text: d.paths.joined(separator: "\n")) }
         // Still the newest item once the bytes are here: put it on the clipboard.
-        if d.apply, let c = db.clip(hash: d.hash), db.clips(limit: 1).first?.hash == d.hash { apply(c) }
-        s.send(.applied(hash: d.hash))
+        if d.apply, let c = db.clip(hash: d.hash), db.clips(limit: 1).first?.hash == d.hash { applyNow(c, to: s) }
         notifyUI()
     }
 
@@ -549,6 +551,7 @@ final class Session {
     // Downloads run one at a time per peer, so a backlog can't flood the link.
 
     func download(_ d: Download) {
+        guard downloads[d.hash] == nil, !pendingDownloads.contains(where: { $0.hash == d.hash }) else { return }
         if downloads.isEmpty { begin(d) } else { pendingDownloads.append(d) }
     }
 

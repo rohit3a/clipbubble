@@ -1,0 +1,10 @@
+[Unit]
+Description=ClipBubble clipboard history and sync
+
+[Service]
+ExecStart=%h/.local/bin/clipbubble
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

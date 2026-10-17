@@ -23,6 +23,12 @@ func runChild() -> Never {
         try? h.close()
     }
     SyncEngine.shared.serveStdio()
+    // A copy made after linking, for peers in other languages to receive live.
+    if let t = env["LIVE_TEXT"] {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            DB().upsert(kind: "text", text: t, file: nil, source: "Notes", hash: "t:" + sha(t))
+        }
+    }
     dispatchMain()
 }
 

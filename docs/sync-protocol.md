@@ -21,10 +21,10 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerA
 `--peer` relays bytes between SSH's stdio and the running app's local endpoint. That is a Unix socket on macOS and Linux and a named pipe on Windows. The app is the only writer of its database.
 
 1. Both sides send `hello`. A different `proto` ends the session, and the newer side shows "Update".
-2. Both sides send `summary`, every stamp from the last 7 days.
+2. Both sides send `summary`, every stamp from the last 7 days except items whose bytes haven't arrived yet. Leaving those out makes the peer send their `put` again, so a download cut off by a dropped link starts again on the next one.
 3. Each side sends `put` or `tombstone` for every hash where its stamp beats the peer's.
 4. From then on each side sends a `put` or `tombstone` whenever its history changes, unless the peer already has that stamp.
-5. Images and files move as `chunk` frames after a `fetch`. Items whose blobs total 25 MB or less are fetched as soon as their `put` arrives, and bigger ones wait for the user.
+5. Images and files move as `chunk` frames after a `fetch`. Items whose blobs total 25 MB or less are fetched whenever a `put` arrives for an item still missing its bytes, and bigger ones wait for the user.
 
 A received item goes on the system clipboard only if it was copied less than 10 seconds ago on its origin's clock (corrected by the `hello` clock offset) and is newer than every local item. The receiver remembers that hash, so its own clipboard capture does not send it back.
 

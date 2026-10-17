@@ -210,11 +210,12 @@ final class DB {
     // MARK: Sync
 
     /// The winning event per hash over the retention window: copies (left out when their kind is switched off) and deletes.
-    func stamps() -> [Stamp] {
+    /// `includingWaiting: false` leaves out synced items whose bytes haven't arrived, so peers offer them again.
+    func stamps(includingWaiting: Bool = true) -> [Stamp] {
         let cutoff = Date().timeIntervalSince1970 - Self.retention
         var out: [String: Stamp] = [:]
         let s = prepare("""
-            SELECT hash, created, 0 FROM clips WHERE created >= ?\(Prefs.hiddenSQL)
+            SELECT hash, created, 0 FROM clips WHERE created >= ?\(includingWaiting ? "" : " AND remote = 0")\(Prefs.hiddenSQL)
             UNION ALL SELECT hash, at, 1 FROM forgotten WHERE at >= ?
             """, [cutoff, cutoff])
         defer { sqlite3_finalize(s) }
