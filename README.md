@@ -75,6 +75,7 @@ What's different on Windows:
 - Auto-paste needs no permission. Apps running as administrator only get a copy, because Windows blocks typing into them.
 - Copies marked as secret by password managers (`ExcludeClipboardContentFromMonitorProcessing`) are never stored.
 - History lives in `%LOCALAPPDATA%\ClipBubble`.
+- Sync over SSH uses the OpenSSH client built into Windows. For other machines to link to this PC, turn on the OpenSSH Server feature and keep `ClipBubble.exe` in `%LOCALAPPDATA%\Programs\ClipBubble`, where `build.ps1` puts it.
 
 For MCP, use the path of your `ClipBubble.exe`, or copy the setup prompt from Settings:
 

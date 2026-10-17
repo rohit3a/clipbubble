@@ -150,6 +150,16 @@ sealed class Capture : IDisposable
 /// Runs on one background thread at a time.
 sealed class Recorder(Db db)
 {
+    /// Copies ClipBubble is about to make, by the hash capture will see: null leaves history alone (a copy synced from
+    /// another machine is already there), a hash moves that item up instead (a synced file, now at a path here).
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string? MoveUp, DateTime At)> expected = new();
+
+    public static void Expect(string captured, string? moveUp) => expected[captured] = (moveUp, DateTime.UtcNow);
+
+    /// The hash capture gives a clip once Board.Write has put it on the clipboard.
+    public static string CaptureHash(Clip c) =>
+        c.Kind == ClipKind.File ? "f:" + Store.Sha(string.Join("\n", c.Paths.Where(p => File.Exists(p) || Directory.Exists(p)))) : c.Hash;
+
     /// The latest capture and the one before it, to spot tools that paste through the clipboard.
     (string Hash, DateTime At, bool Inserted)? last;
     string? previousHash;
@@ -166,6 +176,12 @@ sealed class Recorder(Db db)
     public bool Record(Snapshot s, string source, DateTime now, bool ours = false)
     {
         if (Classify(s) is not { } clip) return false;
+        if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5 && e.MoveUp != clip.Hash)
+        {
+            if (e.MoveUp == null) return false;
+            db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+            return true;
+        }
         if (clip.Hash == last?.Hash && db.Exists(clip.Hash)) return false;   // copied again after a delete: save it again
         var category = clip.Kind switch { ClipKind.Image => "images", ClipKind.File => "files", _ => "text" };
         if (!Prefs.On(category)) return false;

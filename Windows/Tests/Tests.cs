@@ -46,6 +46,7 @@ static class Program
     static void Reset()
     {
         using (var db = new Db()) db.DeleteAll();
+        Sql.Exec(Paths.Db, "DELETE FROM forgotten");   // the deletes above are remembered for sync; each test starts clean
         foreach (var c in Prefs.Categories) Prefs.SetOn(c.Key, true);
         File.Delete(Path.Combine(Paths.Dir, "forgotten.json"));
         if (Directory.Exists(Mascots.Dir)) Directory.Delete(Mascots.Dir, true);
@@ -62,8 +63,13 @@ static class Program
             var sql = Sql.Query(Paths.Db, "SELECT sql FROM sqlite_master WHERE name IN ('clips','clips_created') ORDER BY name");
             Check(Squash(sql[0]) == Squash(@"CREATE TABLE clips(
               id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
-              file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL)"), "clips table: " + sql[0]);
+              file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL,
+              origin TEXT NOT NULL DEFAULT '', remote INTEGER NOT NULL DEFAULT 0)"), "clips table: " + sql[0]);
             Check(Squash(sql[1]) == Squash("CREATE INDEX clips_created ON clips(created)"), "index: " + sql[1]);
+            var sync = Sql.Query(Paths.Db, "SELECT sql FROM sqlite_master WHERE name IN ('forgotten','devices') ORDER BY name");
+            Check(Squash(sync[0]) == Squash("CREATE TABLE devices(id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT NOT NULL DEFAULT '')"), "devices: " + sync[0]);
+            Check(Squash(sync[1]) == Squash("CREATE TABLE forgotten(hash TEXT PRIMARY KEY, at REAL NOT NULL)"), "forgotten: " + sync[1]);
+            Check(Sql.Query(Paths.Db, "PRAGMA user_version")[0] == "1", "user_version 1");
             Check(Sql.Query(Paths.Db, "PRAGMA journal_mode")[0] == "wal", "WAL mode");
         }),
 
@@ -785,6 +791,57 @@ static class Program
                 Snapshots.Pump(1);
             }
             Check(model.Clips.Count == 1, "still in history, rather than gone now and back after the next backfill");
+        }),
+
+        ("ClipBubble.exe --peer relays ssh to the running app", () =>
+        {
+            var exe = Path.Combine(AppContext.BaseDirectory, "ClipBubble.exe");
+            var e = new Engine("Windows test");
+            e.Start();
+            Thread.Sleep(300);
+            // Same as HostLink: keep .NET Framework from writing a byte order mark down the pipe.
+            Console.InputEncoding = new UnicodeEncoding(false, false);
+            using var p = Process.Start(new ProcessStartInfo(exe, "--peer") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true })!;
+            var frames = Codec.Encode(new Hello(SyncProto.Version, "relay-peer", "Relay", "linux", "1.4.0", Engine.Now)).Concat(Codec.Encode(new Summary(Array.Empty<Stamp>()))).ToArray();
+            p.StandardInput.BaseStream.Write(frames, 0, frames.Length);
+            p.StandardInput.BaseStream.Flush();
+            var reader = new FrameReader();
+            var got = new List<Frame>();
+            var read = new Thread(() =>
+            {
+                var buf = new byte[65536];
+                int n;
+                while (!got.OfType<Summary>().Any() && (n = p.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0) got.AddRange(reader.Feed(buf, n));
+            }) { IsBackground = true };
+            read.Start();
+            Check(read.Join(10_000), "the app answers through the relay (a GUI exe still gets ssh's stdio)");
+            Check(got.OfType<Hello>().SingleOrDefault() is { Os: "windows", Name: "Windows test" }, "its hello");
+            Check(SpinWait.SpinUntil(() => e.Linked.Any(h => h.Name == "Relay"), 5000), "the app sees the peer");
+            p.StandardInput.Close();
+            Check(p.WaitForExit(10_000), "the relay exits when ssh closes");
+            Check(SpinWait.SpinUntil(() => e.Linked.Count == 0, 5000), "the app drops the session");
+        }),
+
+        ("copies from other machines don't echo into history", () =>
+        {
+            using var db = new Db();
+            var r = new Recorder(db);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            var hash = "t:" + Store.Sha("from the mac");
+            db.Insert(new Entry(hash, now - 1, "text", "from the mac", "Safari", "mac-1", Array.Empty<Blob>()), "mac-1");
+            Recorder.Expect(hash, null);
+            Check(!r.Record(Text("from the mac"), "Windows", DateTime.Now, ours: true), "the synced copy is left alone");
+            Check(db.Clips().Single().Time == now - 1 && db.Clips().Single().Source == "Safari", "not bumped or renamed");
+
+            // A synced file now lives in Downloads\ClipBubble: picking it moves that item up, not a new one.
+            var local = Path.Combine(Paths.Dir, "a.pdf");
+            File.WriteAllText(local, "%PDF");
+            db.Insert(new Entry("f:remote", now - 100, "file", "a.pdf", "Finder", "mac-1", new[] { new Blob("a.pdf", 4, "") }), "mac-1");
+            db.Received("f:remote", text: local);
+            var c = db.ByHash("f:remote")!;
+            Recorder.Expect(Recorder.CaptureHash(c), c.Hash);
+            Check(r.Record(new Snapshot(new[] { local }, null, null, null), "Windows", DateTime.Now, ours: true), "the list changes");
+            Check(db.Clips().Count == 2 && db.ByHash("f:remote")!.Time > now - 5, "the synced item moved up instead of a copy appearing");
         }),
 
         ("copying the previous item again after deleting it saves it", () =>

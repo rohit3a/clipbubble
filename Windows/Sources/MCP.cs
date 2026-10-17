@@ -14,7 +14,7 @@ static class Mcp
 {
     const string Instructions =
         "ClipBubble keeps the user's last 7 days of clipboard history on their PC: text, images, files, screenshots " +
-        "and downloads. When they mention something they copied, a screenshot they took, a file they downloaded or " +
+        "and downloads, plus everything synced from their other machines (their Mac and others). When they mention something they copied, a screenshot they took, a file they downloaded or " +
         "\"that thing from earlier\", look it up with clipboard_history (use query, kind or source to narrow it) and read " +
         "it in full with clipboard_get, which returns images so you can see them. Use clipboard_set to hand the user " +
         "something to paste. The mascot_* tools change the little character in their ClipBubble bubble.";
@@ -45,12 +45,12 @@ Then check it works by calling clipboard_history with limit 3 (restart or reload
     static readonly object[] Tools =
     {
         Obj(("name", "clipboard_history"),
-            ("description", "List the user's recent clipboard items (last 7 days, newest first): text, images and files copied on this PC, plus screenshots and downloads. Use limit 1 for the latest copy. Returns ids for clipboard_get."),
+            ("description", "List the user's recent clipboard items (last 7 days, newest first): text, images and files copied on this PC, plus screenshots, downloads and everything synced from their other machines. Use limit 1 for the latest copy. Returns ids for clipboard_get."),
             ("inputSchema", Schema(
                 ("limit", Obj(("type", "integer"), ("description", "Max items, default 20, max 100"))),
                 ("kind", Obj(("type", "string"), ("enum", new[] { "text", "image", "file" }))),
                 ("query", Str("Substring to search text, file paths and source app")),
-                ("source", Str("Source app name, or \"Screenshot\" / \"Downloads\"")),
+                ("source", Str("Source app name, \"Screenshot\" / \"Downloads\", or a linked device's name (e.g. \"Mac\") for everything synced from it")),
                 ("since_hours", Obj(("type", "number"), ("description", "Only items from the last N hours")))))),
         Obj(("name", "clipboard_get"),
             ("description", "Get one clipboard item in full by id: the complete text, or the image itself (and its file path), or the file paths."),
@@ -153,7 +153,10 @@ Then check it works by calling clipboard_history with limit 3 (restart or reload
 
     public static Dictionary<string, object> Call(Db db, string name, Dictionary<string, object?> a)
     {
-        string Header(Clip c) => $"#{c.Id} · {c.Kind.Name()} · {c.Source} · {c.Created.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}";
+        Dictionary<string, string>? devices = null;
+        string From(Clip c) => c.Origin.Length == 0 ? ""
+            : " · from " + ((devices ??= db.DeviceNames()).TryGetValue(c.Origin, out var n) ? n : "another device") + (c.Remote ? " (not downloaded yet)" : "");
+        string Header(Clip c) => $"#{c.Id} · {c.Kind.Name()} · {c.Source} · {c.Created.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}{From(c)}";
         string? S(string k) => a.TryGetValue(k, out var v) ? v as string : null;
 
         switch (name)
@@ -169,7 +172,7 @@ Then check it works by calling clipboard_history with limit 3 (restart or reload
                 Prefs.Reload();
                 if (Int(a.GetValueOrDefault("id")) is not { } id || db.Clip(id) is not { } c) return Text("No item with that id.", error: true);
                 var content = new List<object> { Obj(("type", "text"), ("text", Header(c) + "\n" + (c.Kind == ClipKind.Image ? c.File ?? "" : c.Text))) };
-                if (c.ImagePath is { } p && ImageBase64(p) is { } b64) content.Add(Obj(("type", "image"), ("data", b64), ("mimeType", "image/png")));
+                if (!c.Remote && c.ImagePath is { } p && ImageBase64(p) is { } b64) content.Add(Obj(("type", "image"), ("data", b64), ("mimeType", "image/png")));
                 return Obj(("content", content));
             }
             case "clipboard_set":
@@ -177,6 +180,7 @@ Then check it works by calling clipboard_history with limit 3 (restart or reload
                 Prefs.Reload();
                 if (S("text") is { } t) { Board.WriteText(t); return Text("Copied text to the clipboard."); }
                 if (Int(a.GetValueOrDefault("id")) is not { } id || db.Clip(id) is not { } c) return Text("Pass text or a valid id.", error: true);
+                if (c.Remote) return Text($"Item #{id} is still on another machine. Get it in ClipBubble first.", error: true);
                 return Board.Write(c) is { } why ? Text($"Couldn't copy item #{id}. {why}", error: true) : Text($"Copied item #{id} to the clipboard.");
             }
             case "mascot_list":
