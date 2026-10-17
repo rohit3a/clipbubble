@@ -774,7 +774,13 @@ def relay():
 
     s = dial()
     if s is None:
-        subprocess.run(["systemctl", "--user", "start", "clipbubble.service"], capture_output=True)
+        try:
+            started = subprocess.run(["systemctl", "--user", "start", "clipbubble.service"], capture_output=True).returncode == 0
+        except OSError:
+            started = False
+        if not started:  # no systemd here: start the app on its own
+            subprocess.Popen([sys.executable, "-P", "-m", "clipbubble"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(40):
             time.sleep(0.25)
             s = dial()

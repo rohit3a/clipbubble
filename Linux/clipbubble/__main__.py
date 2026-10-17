@@ -2,16 +2,25 @@
 import os
 import signal
 import sys
+import time
 
 
 def run_app():
-    from gi.repository import GLib
+    from .engine import Engine, log
+    from .store import DB
+    try:
+        from gi.repository import GLib
+    except ImportError:
+        # A server with no desktop: history still syncs, and agents there still see it.
+        engine = Engine()
+        engine.start()
+        while True:
+            DB().prune()
+            time.sleep(3600)
 
     from . import board
     from .capture import Capture
-    from .engine import Engine, log
     from .shell import Shell
-    from .store import DB
 
     shell = Shell()
     engine = Engine()

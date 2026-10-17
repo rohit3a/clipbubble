@@ -816,6 +816,8 @@ struct SyncSettings: View {
     @ObservedObject var model: Model
     @State private var hosts: [String] = []
     @State private var enabled = Set(SyncEngine.enabledHosts)
+    @State private var setup: [String: String] = [:]   // progress or result text per host
+    @State private var installing: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -840,9 +842,17 @@ struct SyncSettings: View {
                                 }
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                             }
+                            if let note = setup[host] {
+                                Text(note).font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                     Spacer(minLength: 8)
+                    if enabled.contains(host), !model.syncPaused, let label = setupLabel(model.links[host]) {
+                        Button(label) { install(host) }
+                            .controlSize(.small).disabled(installing.contains(host))
+                    }
                     Toggle("", isOn: Binding(get: { enabled.contains(host) }, set: { on in
                         if on { enabled.insert(host) } else { enabled.remove(host) }
                         SyncEngine.shared.setHost(host, on: on)
@@ -865,6 +875,25 @@ struct SyncSettings: View {
                 .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
         }
         .onAppear { hosts = SSHConfig.hosts() }
+    }
+
+    private func setupLabel(_ state: LinkState?) -> String? {
+        switch state {
+        case .notInstalled: return "Set up"
+        case .versionMismatch(let h): return h.os == "linux" ? "Update" : nil
+        case .live(let h): return RemoteSetup.isOutdated(h) ? "Update" : nil
+        default: return nil
+        }
+    }
+
+    private func install(_ host: String) {
+        installing.insert(host)
+        RemoteSetup.run(host, progress: { setup[host] = $0 }, done: { r in
+            installing.remove(host)
+            setup[host] = r.text
+            if case .otherOS = r { NSWorkspace.shared.open(RemoteSetup.releases) }
+            SyncEngine.shared.redial(host)
+        })
     }
 }
 

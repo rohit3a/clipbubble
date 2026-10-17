@@ -57,6 +57,9 @@ final class SyncEngine {
         queue.async { self.reconcileLinks() }
     }
 
+    /// Tries a host again now, say right after setting it up.
+    func redial(_ alias: String) { queue.async { self.links[alias]?.redial() } }
+
     func setPaused(_ paused: Bool) {
         UserDefaults.standard.set(paused, forKey: "sync.paused")
         queue.async { [self] in
@@ -186,7 +189,7 @@ final class SyncEngine {
         case .hello(let h):
             guard h.proto == Sync.proto else {
                 SyncLog.write("\(h.name) speaks protocol \(h.proto), this Mac \(Sync.proto)")
-                s.link?.versionMismatch(h.version)
+                s.link?.versionMismatch(h)
                 s.close()
                 return
             }
@@ -297,23 +300,23 @@ final class SyncEngine {
 
 enum LinkState: Equatable {
     case connecting
-    case live(String)
+    case live(Hello)
     case needsKeyAuth
     case unknownHost
     case notInstalled
     case appNotRunning
-    case versionMismatch(String)
+    case versionMismatch(Hello)
     case offline(Date)
 
     var text: String {
         switch self {
         case .connecting: return "Connecting…"
-        case .live(let n): return "Linked with \(n)"
+        case .live(let h): return "Linked with \(h.name)"
         case .needsKeyAuth: return "Needs SSH key login"
         case .unknownHost: return "Connect once in Terminal to trust this host"
         case .notInstalled: return "ClipBubble isn't installed there"
         case .appNotRunning: return "ClipBubble isn't running there"
-        case .versionMismatch(let v): return "Update needed (it has \(v))"
+        case .versionMismatch(let h): return "Update needed (it has \(h.version))"
         case .offline(let at):
             let s = max(0, Int(at.timeIntervalSinceNow))
             return s > 0 ? "Offline, retrying in \(s < 60 ? "\(s) s" : "\(s / 60) min")" : "Offline"
@@ -333,7 +336,7 @@ final class HostLink {
     private var backoff: Double = 1
     private var retry: DispatchWorkItem?
     private var stopped = false
-    private var mismatch: String?
+    private var mismatch: Hello?
     private(set) var state: LinkState = .connecting
 
     private var windows: Bool {
@@ -383,10 +386,10 @@ final class HostLink {
     func helloReceived(_ h: Hello) {
         backoff = 1
         mismatch = nil
-        set(.live(h.name))
+        set(.live(h))
     }
 
-    func versionMismatch(_ v: String) { mismatch = v }
+    func versionMismatch(_ h: Hello) { mismatch = h }
 
     func sessionEnded(_ s: Session) {
         guard session === s else { return }
@@ -406,7 +409,7 @@ final class HostLink {
             return
         }
         let next: LinkState
-        if let v = mismatch { next = .versionMismatch(v) }
+        if let h = mismatch { next = .versionMismatch(h) }
         else if err.contains("CLIPBUBBLE_NOT_INSTALLED") || (windows && err.contains("cannot find the path")) { next = .notInstalled }
         else if err.contains("CLIPBUBBLE_NOT_RUNNING") { next = .appNotRunning }
         else if err.contains("Host key verification failed") { next = .unknownHost }
