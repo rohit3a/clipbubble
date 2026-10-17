@@ -800,7 +800,10 @@ static class Program
             Thread.Sleep(300);
             // Same as HostLink: keep .NET Framework from writing a byte order mark down the pipe.
             Console.InputEncoding = new UnicodeEncoding(false, false);
-            using var p = Process.Start(new ProcessStartInfo(exe, "--peer") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true })!;
+            using var p = Process.Start(new ProcessStartInfo(exe, "--peer") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            var stderr = new StringBuilder();
+            p.ErrorDataReceived += (_, x) => { if (x.Data != null) lock (stderr) stderr.AppendLine(x.Data); };
+            p.BeginErrorReadLine();
             var frames = Codec.Encode(new Hello(SyncProto.Version, "relay-peer", "Relay", "linux", "1.4.0", Engine.Now)).Concat(Codec.Encode(new Summary(Array.Empty<Stamp>()))).ToArray();
             p.StandardInput.BaseStream.Write(frames, 0, frames.Length);
             p.StandardInput.BaseStream.Flush();
@@ -814,7 +817,11 @@ static class Program
             }) { IsBackground = true };
             read.Start();
             Check(read.Join(10_000), "the app answers through the relay (a GUI exe still gets ssh's stdio)");
-            Check(got.OfType<Hello>().SingleOrDefault() is { Os: "windows", Name: "Windows test" }, "its hello");
+            var log = Path.Combine(Paths.Dir, "sync.log");
+            Check(got.OfType<Hello>().SingleOrDefault() is { Os: "windows", Name: "Windows test" },
+                $"its hello; got [{string.Join(", ", got.Select(f => f is Hello h ? $"hello {h.Os} {h.Name}" : f.Type.ToString()))}]"
+                + $", relay {(p.WaitForExit(1000) ? "exited " + p.ExitCode : "still running")}, stderr: {stderr.ToString().Trim()}"
+                + $", sync.log: {(File.Exists(log) ? File.ReadAllText(log).Trim() : "none")}");
             Check(SpinWait.SpinUntil(() => e.Linked.Any(h => h.Name == "Relay"), 5000), "the app sees the peer");
             p.StandardInput.Close();
             Check(p.WaitForExit(10_000), "the relay exits when ssh closes");
