@@ -117,37 +117,62 @@ static class Mascots
         for (var n = 2; taken.Contains(id); n++) id = $"{b}-{n}";
 
         var values = new Dictionary<string, string>();
-        foreach (var state in new[] { "idle", "hover", "active" })
+        var copied = new List<string>();
+        try
         {
-            var value = states.GetValueOrDefault(state)?.Trim();
-            if (string.IsNullOrEmpty(value)) continue;
-            if (kind == "image")
+            foreach (var state in new[] { "idle", "hover", "active" })
             {
-                string file;
-                if (value!.StartsWith("<svg") || value.StartsWith("<?xml"))
+                var value = states.GetValueOrDefault(state)?.Trim();
+                if (string.IsNullOrEmpty(value)) continue;
+                if (kind == "image")
                 {
-                    file = $"{id}-{state}.svg";
-                    File.WriteAllText(Path.Combine(Dir, file), value);
+                    string file;
+                    if (value!.StartsWith("<svg") || value.StartsWith("<?xml"))
+                    {
+                        file = $"{id}-{state}.svg";
+                        var dest = Path.Combine(Dir, file);
+                        if (!File.Exists(dest)) copied.Add(dest);   // only files this import makes are cleaned up
+                        try { File.WriteAllText(dest, value); }
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                        {
+                            throw new MascotException($"couldn't save the {state} SVG: {e.Message}");
+                        }
+                    }
+                    else
+                    {
+                        var src = Environment.ExpandEnvironmentVariables(value.StartsWith("~") ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + value.Substring(1) : value);
+                        file = $"{id}-{state}{Path.GetExtension(src).ToLowerInvariant()}";
+                        var dest = Path.Combine(Dir, file);
+                        try
+                        {
+                            // Already in place (a leftover file with this name): use it, and never delete it on failure.
+                            if (!string.Equals(Path.GetFullPath(src), Path.GetFullPath(dest), StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (!File.Exists(dest)) copied.Add(dest);
+                                File.Copy(src, dest, overwrite: true);
+                            }
+                        }
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                        {
+                            throw new MascotException($"couldn't read the {state} image at {src}");
+                        }
+                    }
+                    if (Glyphs.Load(Url(file), 34) == null) throw new MascotException($"couldn't read the {state} image; use PNG, GIF, JPG or SVG");
+                    value = file;
                 }
-                else
-                {
-                    var src = Environment.ExpandEnvironmentVariables(value.StartsWith("~") ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + value.Substring(1) : value);
-                    file = $"{id}-{state}{Path.GetExtension(src).ToLowerInvariant()}";
-                    File.Copy(src, Path.Combine(Dir, file), overwrite: true);
-                }
-                if (Glyphs.Load(Url(file), 34) == null)
-                {
-                    File.Delete(Path.Combine(Dir, file));
-                    throw new MascotException($"couldn't read the {state} image; use PNG, GIF, JPG or SVG");
-                }
-                value = file;
+                values[state] = value!;
             }
-            values[state] = value!;
+            var m = new Mascot(id, name, kind, kind == "blob" ? color : null, values.GetValueOrDefault("idle"), values.GetValueOrDefault("hover"), values.GetValueOrDefault("active"));
+            Store.WriteAtomic(Path.Combine(Dir, id + ".json"), Encoding.UTF8.GetBytes(Store.Json.Serialize(m.ToJson())));
+            Notify();
+            return m;
         }
-        var m = new Mascot(id, name, kind, kind == "blob" ? color : null, values.GetValueOrDefault("idle"), values.GetValueOrDefault("hover"), values.GetValueOrDefault("active"));
-        Store.WriteAtomic(Path.Combine(Dir, id + ".json"), Encoding.UTF8.GetBytes(Store.Json.Serialize(m.ToJson())));
-        Notify();
-        return m;
+        catch
+        {
+            // A failed add leaves nothing behind.
+            foreach (var f in copied) try { File.Delete(f); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            throw;
+        }
     }
 
     /// Deletes a custom mascot, its manifest and the image files Add made for it (named `id-state.ext`), never a file

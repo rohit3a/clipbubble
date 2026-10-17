@@ -92,6 +92,9 @@ static partial class Store
         }
     }
 
+    /// The first `n` characters, without cutting an emoji or other surrogate pair in half.
+    public static string Head(string s, int n) => s.Length <= n ? s : s.Substring(0, char.IsHighSurrogate(s[n - 1]) ? n - 1 : n);
+
     public static Stream OpenShared(string path) => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
 }
@@ -252,7 +255,14 @@ sealed partial class Db : IDisposable
         }
         // A linked device's name finds everything synced from it.
         if (source != null) { tail += " AND (source = ? COLLATE NOCASE OR origin IN (SELECT id FROM devices WHERE name = ? COLLATE NOCASE))"; args.Add(source); args.Add(source); }
-        if (!string.IsNullOrEmpty(query)) { tail += " AND (text LIKE ? OR source LIKE ?)"; args.Add($"%{query}%"); args.Add($"%{query}%"); }
+        if (query is { Length: > 0 })
+        {
+            // Match % and _ literally: search is plain text, not a pattern.
+            var q = "%" + query.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_") + "%";
+            tail += @" AND (text LIKE ? ESCAPE '\' OR source LIKE ? ESCAPE '\')";
+            args.Add(q);
+            args.Add(q);
+        }
         tail += Prefs.HiddenSql;
         tail += " ORDER BY created DESC LIMIT ?";
         args.Add(limit);
@@ -281,13 +291,24 @@ sealed partial class Db : IDisposable
     void DeleteWhere(string where, params object?[] args) => DeleteWhere(where, forget: true, args);
 
     /// Rows go first and files after, so a delete that fails (a locked database) never leaves a row without its image.
-    /// A delete is recorded with its time, so folders don't re-import it and linked devices hear about it.
+    /// A delete is recorded with its time, so folders don't re-import it and linked devices hear about it. Recording
+    /// and deleting happen together or not at all.
     void DeleteWhere(string where, bool forget, params object?[] args)
     {
         var gone = Select(where, args);
-        if (forget && gone.Count > 0)
-            Run("INSERT OR REPLACE INTO forgotten(hash, at) SELECT hash, ? FROM clips " + where, new object?[] { Now }.Concat(args).ToArray());
-        Run("DELETE FROM clips " + where, args);
+        Run("BEGIN IMMEDIATE");
+        try
+        {
+            if (forget && gone.Count > 0)
+                Run("INSERT OR REPLACE INTO forgotten(hash, at) SELECT hash, ? FROM clips " + where, new object?[] { Now }.Concat(args).ToArray());
+            Run("DELETE FROM clips " + where, args);
+            Run("COMMIT");
+        }
+        catch
+        {
+            try { Run("ROLLBACK"); } catch (InvalidOperationException) { }   // the original error is the one to report
+            throw;
+        }
         RemoveFiles(gone);
         if (forget) Notify(gone.Select(c => c.Hash).ToList());
     }
@@ -389,6 +410,53 @@ sealed partial class Db : IDisposable
         finally { sqlite3_finalize(s); }
     }
 
+    /// ClipBubble 1.3.0 for Windows kept removed screenshots and downloads in forgotten.json. They move into
+    /// `forgotten` once, with when they were removed: each path it listed, and everything in `folders` (the screenshot
+    /// and Downloads folders, watched or not) added before its last Clear all. False while the file, or one of those
+    /// folders, can't be read, so the folder import waits rather than bringing those files back.
+    public bool ImportLegacyForgotten(IEnumerable<string?> folders)
+    {
+        try { return MoveLegacyForgotten(folders); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }   // tried again next time
+    }
+
+    bool MoveLegacyForgotten(IEnumerable<string?> folders)
+    {
+        var json = Path.Combine(Paths.Dir, "forgotten.json");
+        if (!System.IO.File.Exists(json)) return true;
+        Dictionary<string, object?> old;
+        try { old = Store.Json.Deserialize<Dictionary<string, object?>>(Store.ReadText(json)) ?? new(); }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { old = new(); }   // not JSON: nothing to keep
+        static double Seconds(object? ms)
+        {
+            try { return ms == null ? 0 : Convert.ToDouble(ms, System.Globalization.CultureInfo.InvariantCulture) / 1000; }
+            catch (Exception e) when (e is FormatException or InvalidCastException or OverflowException) { return 0; }
+        }
+        var clearedAt = Seconds(old.GetValueOrDefault("ClearedAt"));
+        static double Added(string path) => new DateTimeOffset(System.IO.File.GetCreationTime(path)).ToUnixTimeMilliseconds() / 1000.0;
+        // 1.3.0 let a file saved at a removed path later come back in; one already there now still does.
+        var removed = (old.GetValueOrDefault("Files") as Dictionary<string, object?> ?? new())
+            .Select(p => (Path: p.Key, At: Seconds(p.Value) is > 0 and var at ? at : Now))
+            .Where(p => !System.IO.File.Exists(p.Path) || Added(p.Path) <= p.At)
+            .ToDictionary(p => p.Path, p => p.At);
+        // A folder that isn't there (an unplugged drive) keeps the file around, so the Clear all still covers it once it
+        // is, until that Clear all is older than anything the import looks at.
+        var missing = false;
+        if (clearedAt > 0)
+            foreach (var folder in folders.Where(f => f != null))
+            {
+                if (!Directory.Exists(folder)) { missing = true; continue; }
+                foreach (var entry in new DirectoryInfo(folder!).EnumerateFileSystemInfos())
+                    if (new DateTimeOffset(entry.CreationTime).ToUnixTimeMilliseconds() / 1000.0 <= clearedAt && !removed.ContainsKey(entry.FullName))
+                        removed[entry.FullName] = clearedAt;
+            }
+        foreach (var r in removed) Run("INSERT OR REPLACE INTO forgotten(hash, at) VALUES(?, ?)", "f:" + Store.Sha(r.Key), r.Value);
+        if (!missing || clearedAt < Now - Retention)
+            try { System.IO.File.Delete(json); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // its rows are in; deleting is tried again next time
+        return true;
+    }
+
     /// Only our own copies of images are deleted, never a screenshot or download the clip points at.
     static void RemoveFiles(IEnumerable<Clip> clips)
     {
@@ -464,48 +532,4 @@ static class Prefs
     public static bool On(string key) => Get("save." + key, true);
     public static void SetOn(string key, bool on) => Set("save." + key, on);
     public static string HiddenSql => string.Concat(Categories.Where(c => !On(c.Key)).Select(c => $" AND NOT ({c.Sql})"));
-}
-
-/// Screenshots and downloads the user took out of history. Their files stay in the folder, so without this the
-/// backfill would add them right back. Only touched on the writer thread.
-sealed class Forgotten
-{
-    static readonly string File = Path.Combine(Paths.Dir, "forgotten.json");
-
-    /// Unix milliseconds of the last Clear all: files added before it stay out.
-    public long ClearedAt { get; set; }
-    /// Single files removed since, with when (dropped after 7 days, when the backfill no longer reaches them).
-    /// A new file saved at the same path later still comes in.
-    public Dictionary<string, long> Files { get; set; } = new();
-
-    /// Null when the file is there but can't be read right now: the backfill then waits rather than bringing
-    /// everything back, and a removal fails rather than rewriting the list without the others.
-    public static Forgotten? Load()
-    {
-        try { return System.IO.File.Exists(File) ? Store.Json.Deserialize<Forgotten>(Store.ReadText(File)) ?? new() : new(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
-        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { return new(); }   // not JSON: start over
-    }
-
-    public bool Has(string path, DateTime added)
-    {
-        var at = new DateTimeOffset(added).ToUnixTimeMilliseconds();
-        return at <= ClearedAt || Files.TryGetValue(path, out var removed) && at <= removed;
-    }
-
-    public static void Remove(Clip c)
-    {
-        if (c.Source is "Screenshot" or "Downloads") Save(f => f.Files[c.Text] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-    }
-
-    public static void ClearAll() => Save(f => { f.ClearedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); f.Files.Clear(); });
-
-    static void Save(Action<Forgotten> change)
-    {
-        var f = Load() ?? throw new IOException("Can't read " + File);
-        change(f);
-        var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)(Db.Retention * 1000);
-        f.Files = f.Files.Where(p => p.Value >= cutoff).ToDictionary(p => p.Key, p => p.Value);
-        Store.WriteAtomic(File, Encoding.UTF8.GetBytes(Store.Json.Serialize(f)));
-    }
 }
