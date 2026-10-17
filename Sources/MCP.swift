@@ -39,7 +39,7 @@ enum MCP {
                 "limit": ["type": "integer", "description": "Max items, default 20, max 100"],
                 "kind": ["type": "string", "enum": ["text", "image", "file"]],
                 "query": ["type": "string", "description": "Substring to search text, file paths and source app"],
-                "source": ["type": "string", "description": "Source app name, \"iPhone\" for items copied on iPhone, or \"Screenshot\" / \"Downloads\""],
+                "source": ["type": "string", "description": "Source app name, \"iPhone\" for items copied on iPhone, \"Screenshot\" / \"Downloads\", or a linked device's name (e.g. \"ROG\") for everything synced from it"],
                 "since_hours": ["type": "number", "description": "Only items from the last N hours"],
             ] as [String: Any]] as [String: Any],
         ],
@@ -119,7 +119,11 @@ enum MCP {
     static func call(_ name: String, _ a: [String: Any]) -> [String: Any] {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd HH:mm"
-        func header(_ c: Clip) -> String { "#\(c.id) · \(c.kind) · \(c.source) · \(fmt.string(from: c.created))" }
+        let devices = db.deviceNames()
+        func header(_ c: Clip) -> String {
+            let from = c.origin.isEmpty ? "" : " · from \(devices[c.origin] ?? "another device")" + (c.remote ? " (not downloaded yet)" : "")
+            return "#\(c.id) · \(c.kind) · \(c.source)\(from) · \(fmt.string(from: c.created))"
+        }
         func int(_ k: String) -> Int64? { (a[k] as? NSNumber)?.int64Value }
 
         switch name {

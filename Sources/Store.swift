@@ -144,7 +144,10 @@ final class DB {
             tail += " AND kind = ?"
             args.append(kind)
         }
-        if let source { tail += " AND source = ? COLLATE NOCASE"; args.append(source) }
+        if let source {
+            tail += " AND (source = ? COLLATE NOCASE OR origin IN (SELECT id FROM devices WHERE name = ? COLLATE NOCASE))"
+            args += [source, source]
+        }
         if let query, !query.isEmpty {
             // Match % and _ literally: search is plain text, not a pattern.
             let q = "%" + query.replacingOccurrences(of: "\\", with: "\\\\")

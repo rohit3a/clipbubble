@@ -29,6 +29,9 @@ final class Model: ObservableObject {
         didSet { if bubbleHover && !oldValue { hoverTicks += 1 }; hoverChanged() }
     }
     @Published var peekHover = false { didSet { hoverChanged() } }
+    @Published var links: [String: LinkState] = [:]
+    @Published var syncPaused = SyncEngine.paused
+    @Published var devices: [String: String] = [:]
     @Published var mascot = Mascots.active()
     @Published var mascots = Mascots.all()
     let db = DB()
@@ -43,6 +46,7 @@ final class Model: ObservableObject {
         let kind = ["text", "image", "file"].contains(filter) ? filter : nil
         let source = ["iphone": "iPhone", "shots": "Screenshot", "downloads": "Downloads"][filter]
         clips = db.clips(kind: kind, source: source, query: query)
+        if clips.contains(where: { !$0.origin.isEmpty }) { devices = db.deviceNames() }
         if !clips.contains(where: { $0.id == selection }) { selection = clips.first?.id }
         Thumbs.prewarm(clips.prefix(40))
     }
@@ -301,6 +305,12 @@ struct BubbleFace: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            if model.syncPaused && !SyncEngine.enabledHosts.isEmpty {
+                Image(systemName: "pause.circle.fill").font(.system(size: 13)).foregroundStyle(.white, Color.orange)
+                    .offset(x: -4, y: 4).help("Sync is paused")
+            }
+        }
         .scaleEffect(model.bubbleHover ? 1.06 : 1)
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: model.bubbleHover)
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: model.unseen)
@@ -333,7 +343,9 @@ struct Row: View, Equatable {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 HStack(spacing: 4) {
-                    if clip.source == "iPhone" {
+                    if !clip.origin.isEmpty {
+                        Image(systemName: clip.remote ? "icloud.and.arrow.down" : "desktopcomputer").font(.system(size: 9.5))
+                    } else if clip.source == "iPhone" {
                         Image(systemName: "iphone").font(.system(size: 9.5))
                     } else if clip.source == "Screenshot" {
                         Image(systemName: "camera.viewfinder").font(.system(size: 9.5))
@@ -393,7 +405,10 @@ struct Row: View, Equatable {
 
     private var subtitle: String {
         var parts = [clip.source, ago(clip.created)]
-        if clip.kind == "file", let p = clip.paths.first {
+        if !clip.origin.isEmpty { parts.insert(model.devices[clip.origin] ?? "Other device", at: 0) }
+        if clip.remote {
+            parts.append("not downloaded yet")
+        } else if clip.kind == "file", let p = clip.paths.first {
             parts.append(((p as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath)
         } else if clip.kind == "text" {
             let lines = head.split(whereSeparator: \.isNewline).count
@@ -605,6 +620,9 @@ struct SettingsView: View {
                         Text("macOS doesn't let apps change these themselves. Switching one on asks for access; if it was blocked, Fix opens the right page in System Settings.")
                             .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
                     }
+                    section("Sync over SSH") {
+                        SyncSettings(model: model)
+                    }
                     section("Mascot") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(44), spacing: 8), count: 7), alignment: .leading, spacing: 8) {
                             ForEach(model.mascots) { m in
@@ -793,6 +811,63 @@ struct SettingsView: View {
     }
 }
 
+/// Settings → Sync over SSH: one switch per host in ~/.ssh/config, with its live status.
+struct SyncSettings: View {
+    @ObservedObject var model: Model
+    @State private var hosts: [String] = []
+    @State private var enabled = Set(SyncEngine.enabledHosts)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Copy on one machine, paste on another. Works with ClipBubble on your other Macs, Linux and Windows machines, using your SSH config and keys.")
+                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.bottom, 6)
+            if hosts.isEmpty {
+                Text("No hosts in ~/.ssh/config yet. Add one there and it shows up here.")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            ForEach(hosts, id: \.self) { host in
+                HStack(spacing: 10) {
+                    Image(systemName: "server.rack").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(host).font(.system(size: 13, weight: .medium))
+                        if enabled.contains(host) {
+                            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                let state = model.syncPaused ? nil : model.links[host]
+                                HStack(spacing: 5) {
+                                    Circle().fill(state?.ok == true ? Color.green : state == nil ? Color.gray : Color.orange)
+                                        .frame(width: 6, height: 6)
+                                    Text(model.syncPaused ? "Paused" : state?.text ?? "Connecting…")
+                                }
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: Binding(get: { enabled.contains(host) }, set: { on in
+                        if on { enabled.insert(host) } else { enabled.remove(host) }
+                        SyncEngine.shared.setHost(host, on: on)
+                    }))
+                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                }
+                .padding(.vertical, 5)
+            }
+            if !enabled.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "pause.circle").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
+                    Text("Pause sync").font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Toggle("", isOn: Binding(get: { model.syncPaused }, set: { model.syncPaused = $0; SyncEngine.shared.setPaused($0) }))
+                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                }
+                .padding(.vertical, 5)
+            }
+            Text("This Mac shows up as \(SyncEngine.shared.name). Files up to 25 MB move on their own. Password-manager copies never leave this Mac.")
+                .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
+        }
+        .onAppear { hosts = SSHConfig.hosts() }
+    }
+}
+
 struct Key: View {
     let keys: String, label: String
     var body: some View {
@@ -950,6 +1025,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in self?.handleKey(e) ?? e }
         registerHotKey()
+        let sync = SyncEngine.shared
+        sync.onReceived = { [weak self] in self?.captured() }
+        sync.onStatus = { [weak self] in self?.model.links = sync.statuses }
+        sync.start()
     }
 
     /// Every screenshot lands in history; copying it to the clipboard as well is optional.
@@ -970,7 +1049,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Prefs.on("downloads") {
             guard downloads == nil, let dir = FolderWatcher.downloadsFolder else { return }
             downloads = FolderWatcher(folder: dir, maxAge: nil,
-                                      include: { !FolderWatcher.tempExts.contains($0.pathExtension.lowercased()) }) { [weak self] url, date in
+                                      include: { !FolderWatcher.tempExts.contains($0.pathExtension.lowercased()) && $0.lastPathComponent != "ClipBubble" }) { [weak self] url, date in
                 self?.model.db.insertIfMissing(kind: "file", text: url.path, source: "Downloads", hash: "f:" + sha(url.path), created: date)
                 self?.captured()
             }

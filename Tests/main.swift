@@ -1,9 +1,14 @@
 import Foundation
 
+signal(SIGPIPE, SIG_IGN)
+let child = ProcessInfo.processInfo.environment["CLIPBUBBLE_CHILD"] != nil
 // Every test gets throwaway data: point Paths at a temp folder before anything touches it.
 let testHome = FileManager.default.temporaryDirectory.appendingPathComponent("clipbubble-tests-\(getpid())")
-try? FileManager.default.removeItem(at: testHome)
-setenv("CLIPBUBBLE_HOME", testHome.path, 1)
+if !child {
+    try? FileManager.default.removeItem(at: testHome)
+    setenv("CLIPBUBBLE_HOME", testHome.path, 1)
+    setenv("CLIPBUBBLE_DOWNLOADS", testHome.appendingPathComponent("Downloads").path, 1)
+}
 
 var failures = 0
 var ran = 0
@@ -17,6 +22,7 @@ if CommandLine.arguments.contains("--write-fixtures") {
     writeFixtures(to: URL(fileURLWithPath: CommandLine.arguments.last!))
     exit(0)
 }
+if child { runChild() }
 
 syncTests()
 storeTests()
