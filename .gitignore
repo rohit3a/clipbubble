@@ -3,3 +3,4 @@ ClipBubble.app/
 .DS_Store
 .claude/
 .codex-*
+.build/

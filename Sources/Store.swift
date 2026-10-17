@@ -10,6 +10,9 @@ struct Clip: Identifiable, Hashable {
     let file: String?         // stored PNG for images
     let source: String        // app name, or "iPhone" for Universal Clipboard
     let created: Date
+    var hash = ""
+    var origin = ""           // device id it was synced from; empty when copied on this machine
+    var remote = false        // its image or files haven't arrived from that device yet
 
     var paths: [String] { kind == "file" ? text.split(separator: "\n").map(String.init) : [] }
     var imagePath: String? { kind == "image" ? file : paths.first(where: isImagePath) }
@@ -22,8 +25,9 @@ func sha(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x"
 func sha(_ s: String) -> String { sha(Data(s.utf8)) }
 
 enum Paths {
-    static let dir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/ClipBubble")
+    /// `CLIPBUBBLE_HOME` points tests and a second local instance at their own data.
+    static let dir = ProcessInfo.processInfo.environment["CLIPBUBBLE_HOME"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/ClipBubble")
     static let images = dir.appendingPathComponent("images")
     static let db = dir.appendingPathComponent("clips.sqlite")
 }
@@ -33,6 +37,9 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 /// SQLite store shared by the app (writer) and the MCP server (reader).
 final class DB {
     static let retention: TimeInterval = 7 * 24 * 3600
+    /// Called with the hashes of every insert, bump or delete, from any DB in this process. Sync sets it;
+    /// it stays nil (and costs nothing) when no device is linked.
+    static var changed: (([String]) -> Void)?
     private var h: OpaquePointer?
 
     init() {
@@ -41,7 +48,8 @@ final class DB {
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Paths.dir.path)
         sqlite3_open(Paths.db.path, &h)
         sqlite3_busy_timeout(h, 3000)
-        // `forgotten` remembers screenshots and downloads you deleted, so the folder import doesn't bring them back.
+        // `forgotten` holds deletes with their time. A clip is only kept if it was copied after its delete,
+        // so a deleted screenshot isn't re-imported and a delete on another device sticks.
         sqlite3_exec(h, """
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS clips(
@@ -49,7 +57,23 @@ final class DB {
               file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS clips_created ON clips(created);
             CREATE TABLE IF NOT EXISTS forgotten(hash TEXT PRIMARY KEY, at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT NOT NULL DEFAULT '');
             """, nil, nil, nil)
+        if scalar("PRAGMA user_version") < 1 {
+            sqlite3_exec(h, """
+                BEGIN;
+                ALTER TABLE clips ADD COLUMN origin TEXT NOT NULL DEFAULT '';
+                ALTER TABLE clips ADD COLUMN remote INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version = 1;
+                COMMIT;
+                """, nil, nil, nil)
+        }
+    }
+
+    private func scalar(_ sql: String) -> Int {
+        let s = prepare(sql, [])
+        defer { sqlite3_finalize(s) }
+        return sqlite3_step(s) == SQLITE_ROW ? Int(sqlite3_column_int64(s, 0)) : 0
     }
 
     private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {
@@ -75,14 +99,15 @@ final class DB {
     }
 
     private func select(_ tail: String, _ args: [Any?]) -> [Clip] {
-        let s = prepare("SELECT id,kind,text,file,source,created FROM clips " + tail, args)
+        let s = prepare("SELECT id,kind,text,file,source,created,hash,origin,remote FROM clips " + tail, args)
         defer { sqlite3_finalize(s) }
         func col(_ i: Int32) -> String { sqlite3_column_text(s, i).map { String(cString: $0) } ?? "" }
         var out: [Clip] = []
         while sqlite3_step(s) == SQLITE_ROW {
             out.append(Clip(id: sqlite3_column_int64(s, 0), kind: col(1), text: col(2),
                             file: sqlite3_column_type(s, 3) == SQLITE_NULL ? nil : col(3),
-                            source: col(4), created: Date(timeIntervalSince1970: sqlite3_column_double(s, 5))))
+                            source: col(4), created: Date(timeIntervalSince1970: sqlite3_column_double(s, 5)),
+                            hash: col(6), origin: col(7), remote: sqlite3_column_int(s, 8) != 0))
         }
         return out
     }
@@ -94,15 +119,17 @@ final class DB {
             ON CONFLICT(hash) DO UPDATE SET created=excluded.created,
               source=CASE WHEN clips.source IN ('Screenshot', 'Downloads') THEN clips.source ELSE excluded.source END
             """, kind, text, file, source, hash, Date().timeIntervalSince1970)
+        DB.changed?([hash])
     }
 
     /// Adds a clip with its own timestamp, leaving any existing identical clip untouched,
-    /// unless the user deleted it (a screenshot or download they removed stays removed).
+    /// unless it was deleted after that time (a screenshot or download you removed stays removed).
     func insertIfMissing(kind: String, text: String, source: String, hash: String, created: Date) {
         run("""
             INSERT OR IGNORE INTO clips(kind,text,source,hash,created)
-            SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM forgotten WHERE hash = ?)
-            """, kind, text, source, hash, created.timeIntervalSince1970, hash)
+            SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM forgotten WHERE hash = ? AND at >= ?)
+            """, kind, text, source, hash, created.timeIntervalSince1970, hash, created.timeIntervalSince1970)
+        if DB.changed != nil, sqlite3_changes(h) > 0 { DB.changed?([hash]) }
     }
 
     func clips(limit: Int = 300, kind: String? = nil, source: String? = nil,
@@ -136,10 +163,13 @@ final class DB {
 
     func exists(hash: String) -> Bool { !select("WHERE hash = ?", [hash]).isEmpty }
 
-    /// Removes a clip the app captured itself (a paste-through), without remembering it as deleted.
+    /// Removes a clip the app captured itself (a paste-through). Recorded as a delete so linked devices drop it too.
     func delete(hash: String) {
-        removeFiles(select("WHERE hash = ?", [hash]))
+        let rows = select("WHERE hash = ?", [hash])
+        forget(rows)
+        removeFiles(rows)
         run("DELETE FROM clips WHERE hash = ?", hash)
+        if !rows.isEmpty { DB.changed?([hash]) }
     }
 
     /// Only images ClipBubble stored itself are deleted; screenshots, downloads and copied files belong to the user.
@@ -150,12 +180,12 @@ final class DB {
         }
     }
 
-    /// Screenshots and downloads come from folders that get re-imported; remember deleting them.
-    private func forget(_ clips: [Clip]) {
-        let now = Date().timeIntervalSince1970
-        for c in clips where c.source == "Screenshot" || c.source == "Downloads" {
-            run("INSERT OR REPLACE INTO forgotten(hash, at) SELECT hash, ? FROM clips WHERE id = ?", now, c.id)
-        }
+    /// Records each delete with its time: folders re-import, and linked devices need to hear about it.
+    private func forget(_ clips: [Clip], at: Double = Date().timeIntervalSince1970) {
+        guard !clips.isEmpty else { return }
+        run("BEGIN")
+        for c in clips { run("INSERT OR REPLACE INTO forgotten(hash, at) SELECT hash, ? FROM clips WHERE id = ?", at, c.id) }
+        run("COMMIT")
     }
 
     func delete(id: Int64) {
@@ -163,6 +193,7 @@ final class DB {
         forget(rows)
         removeFiles(rows)
         run("DELETE FROM clips WHERE id = ?", id)
+        if !rows.isEmpty { DB.changed?(rows.map(\.hash)) }
     }
 
     func deleteAll() {
@@ -170,6 +201,90 @@ final class DB {
         forget(rows)
         removeFiles(rows)
         run("DELETE FROM clips")
+        if !rows.isEmpty { DB.changed?(rows.map(\.hash)) }
+    }
+
+    // MARK: Sync
+
+    /// The winning event per hash over the retention window: copies (left out when their kind is switched off) and deletes.
+    func stamps() -> [Stamp] {
+        let cutoff = Date().timeIntervalSince1970 - Self.retention
+        var out: [String: Stamp] = [:]
+        let s = prepare("""
+            SELECT hash, created, 0 FROM clips WHERE created >= ?\(Prefs.hiddenSQL)
+            UNION ALL SELECT hash, at, 1 FROM forgotten WHERE at >= ?
+            """, [cutoff, cutoff])
+        defer { sqlite3_finalize(s) }
+        while sqlite3_step(s) == SQLITE_ROW {
+            let st = Stamp(hash: String(cString: sqlite3_column_text(s, 0)), time: sqlite3_column_double(s, 1),
+                           deleted: sqlite3_column_int(s, 2) == 1)
+            if st.beats(out[st.hash]) { out[st.hash] = st }
+        }
+        return Array(out.values)
+    }
+
+    func stamp(hash: String) -> Stamp? {
+        let s = prepare("SELECT created, 0 FROM clips WHERE hash = ? UNION ALL SELECT at, 1 FROM forgotten WHERE hash = ?", [hash, hash])
+        defer { sqlite3_finalize(s) }
+        var best: Stamp?
+        while sqlite3_step(s) == SQLITE_ROW {
+            let st = Stamp(hash: hash, time: sqlite3_column_double(s, 0), deleted: sqlite3_column_int(s, 1) == 1)
+            if st.beats(best) { best = st }
+        }
+        return best
+    }
+
+    func clip(hash: String) -> Clip? { select("WHERE hash = ?", [hash]).first }
+
+    /// Whether a kind of item from a source would be shown, under the Settings switches.
+    func allowed(kind: String, source: String) -> Bool {
+        let s = prepare("SELECT 1 FROM (SELECT ? AS kind, ? AS source) WHERE 1" + Prefs.hiddenSQL, [kind, source])
+        defer { sqlite3_finalize(s) }
+        return sqlite3_step(s) == SQLITE_ROW
+    }
+
+    /// Adds an item from a linked device. Its image or files are marked remote until they arrive.
+    func insert(_ e: Entry, origin: String) {
+        let names = e.kind == "file" ? e.text : ""
+        run("""
+            INSERT INTO clips(kind,text,source,hash,created,origin,remote) VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(hash) DO UPDATE SET created = max(created, excluded.created)
+            """, e.kind, e.kind == "text" ? e.text : names, e.source, e.hash, e.time, origin, e.blobs.isEmpty ? 0 : 1)
+        DB.changed?([e.hash])
+    }
+
+    func bump(hash: String, to time: Double) {
+        run("UPDATE clips SET created = ? WHERE hash = ? AND created < ?", time, hash, time)
+        DB.changed?([hash])
+    }
+
+    /// A delete from a linked device: removes the item unless it was copied again after that.
+    func tombstone(_ st: Stamp) {
+        let rows = select("WHERE hash = ? AND created <= ?", [st.hash, st.time])
+        removeFiles(rows)
+        run("DELETE FROM clips WHERE hash = ? AND created <= ?", st.hash, st.time)
+        run("INSERT INTO forgotten(hash, at) VALUES(?, ?) ON CONFLICT(hash) DO UPDATE SET at = max(at, excluded.at)", st.hash, st.time)
+        DB.changed?([st.hash])
+    }
+
+    /// An image or files arrived: point the item at them and make it pasteable.
+    func received(hash: String, file: String?, text: String?) {
+        if let text { run("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", text, hash) }
+        else { run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash) }
+    }
+
+    func saveDevice(id: String, name: String, os: String) {
+        run("INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os", id, name, os)
+    }
+
+    func deviceNames() -> [String: String] {
+        let s = prepare("SELECT id, name FROM devices", [])
+        defer { sqlite3_finalize(s) }
+        var out: [String: String] = [:]
+        while sqlite3_step(s) == SQLITE_ROW {
+            out[String(cString: sqlite3_column_text(s, 0))] = String(cString: sqlite3_column_text(s, 1))
+        }
+        return out
     }
 
     /// Drops everything older than the 7-day retention window.
