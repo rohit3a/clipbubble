@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Media;
@@ -1022,7 +1023,9 @@ static class Program
             Snapshots.Pump(6);   // checked every 5 s
             File.WriteAllText(Path.Combine(folder, "new.png"), "x");
             for (var i = 0; i < 20 && seen.Count == 0; i++) Snapshots.Pump(0.5);   // the check runs off the UI thread: give a busy runner time
-            Check(seen.SequenceEqual(new[] { "new.png" }), "reported: " + string.Join(",", seen));
+            Check(seen.SequenceEqual(new[] { "new.png" }), "reported: " + string.Join(",", seen)
+                + $"; same creation time as the renamed one: {Directory.GetCreationTimeUtc(folder) == Directory.GetCreationTimeUtc(folder + "-old")}"
+                + $", thread pool answers: {Task.Run(() => 1).Wait(2000)}");
         }),
 
         ("MCP over stdio from the real exe: tools, history, image, mascots", Mcp),
