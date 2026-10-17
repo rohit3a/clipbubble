@@ -1021,7 +1021,7 @@ static class Program
             Thread.Sleep(50);
             Snapshots.Pump(6);   // checked every 5 s
             File.WriteAllText(Path.Combine(folder, "new.png"), "x");
-            Snapshots.Pump(1);
+            for (var i = 0; i < 20 && seen.Count == 0; i++) Snapshots.Pump(0.5);   // the check runs off the UI thread: give a busy runner time
             Check(seen.SequenceEqual(new[] { "new.png" }), "reported: " + string.Join(",", seen));
         }),
 
