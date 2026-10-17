@@ -42,7 +42,8 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           name: ClipBubble-Windows
-      - run: gh release upload "$TAG" ClipBubble-Windows.zip --clobber --repo "$GITHUB_REPOSITORY"
+      # The bare exe is what the README and website link to; the zip stays for older links.
+      - run: unzip -o ClipBubble-Windows.zip && gh release upload "$TAG" ClipBubble.exe ClipBubble-Windows.zip --clobber --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}

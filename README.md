@@ -34,7 +34,7 @@
 
 ## Install
 
-**Download:** grab `ClipBubble.zip` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), unzip it, and move `ClipBubble.app` to Applications. The app isn't notarized, so the first launch needs right-click → **Open**, or:
+**Download:** grab `ClipBubble.dmg` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), open it, and drag `ClipBubble.app` to Applications. The app isn't notarized, so the first launch needs right-click → **Open**, or:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/ClipBubble.app
@@ -57,7 +57,7 @@ git clone https://github.com/rohit3a/clipbubble && cd clipbubble && ./build.sh
 
 The Windows version lives in [`Windows/`](Windows). It's a separate C# app with the same panel, mascots, history database and MCP tools. It needs Windows 10 22H2 or Windows 11 and nothing else. It runs on the .NET Framework that ships with Windows, as one 220 KB `ClipBubble.exe`.
 
-**Download:** grab `ClipBubble-Windows.zip` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), unzip it anywhere and run `ClipBubble.exe`. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**.
+**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it anywhere and run it. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**.
 
 **Or build from source** (needs the [.NET SDK](https://dotnet.microsoft.com/download)):
 
