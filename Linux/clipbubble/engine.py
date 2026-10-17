@@ -880,6 +880,52 @@ class Download:
         self.temp.unlink(missing_ok=True)
 
 
+def ssh_hosts():
+    """Host aliases from ~/.ssh/config and the files it includes, skipping patterns."""
+    import glob
+    ssh = Path.home() / ".ssh"
+    seen, visited = [], set()
+
+    def read(path):
+        if path in visited:
+            return
+        visited.add(path)
+        try:
+            text = Path(path).read_text()
+        except (OSError, UnicodeDecodeError):
+            return
+        for line in text.splitlines():
+            parts = line.replace("=", " ").split()
+            if not parts:
+                continue
+            key = parts[0].lower()
+            if key == "host":
+                for h in parts[1:]:
+                    if not any(c in h for c in "*?") and not h.startswith("!") and h not in seen:
+                        seen.append(h)
+            elif key == "include":
+                for pattern in parts[1:]:
+                    p = os.path.expanduser(pattern)
+                    for f in sorted(glob.glob(p if p.startswith("/") else str(ssh / p))):
+                        read(f)
+
+    read(str(ssh / "config"))
+    return seen
+
+
+def state_text(state):
+    kind, arg = state
+    if kind == "live":
+        return f"Linked with {arg}"
+    if kind == "offline":
+        s = max(0, int(arg - time.time())) if arg else 0
+        return f"Offline, retrying in {s} s" if 0 < s < 60 else f"Offline, retrying in {s // 60} min" if s else "Offline"
+    return {"connecting": "Connecting…", "needs-key": "Needs SSH key login",
+            "unknown-host": "Connect once in a terminal to trust this host",
+            "not-installed": "ClipBubble isn't installed there", "not-running": "ClipBubble isn't running there",
+            "version": f"Update needed (it has {arg})"}.get(kind, kind)
+
+
 def relay():
     """clipbubble --peer, run by ssh here: pipes ssh's stdio to the running app, starting it if needed."""
     import sys

@@ -82,16 +82,34 @@ class Shell:
         r = self.call("WorkArea")
         return r.unpack() if r else None
 
-    def subscribe(self, on_clipboard, on_hotkey=None):
-        """Signals arrive on the thread running the default GLib main loop, whenever the extension is loaded."""
+    def activate(self, title):
+        r = self.call("Activate", "(s)", (title,))
+        return bool(r and r.unpack()[0])
+
+    def set_bubble(self, state):
+        self.call("SetBubble", "(s)", (json.dumps(state),))
+
+    def bubble_rect(self):
+        r = self.call("BubbleRect")
+        return r.unpack() if r else None
+
+    def pulse(self):
+        self.call("Pulse")
+
+    def set_peek(self, rows, hint):
+        self.call("SetPeek", "(s)", (json.dumps({"rows": rows, "hint": hint}),))
+
+    def subscribe(self, on_clipboard=None, **handlers):
+        """Signals arrive on the thread running the default GLib main loop, whenever the extension is loaded.
+        handlers maps signal names (HotKey, BubbleClicked, BubbleMoved, PeekPicked) to callables taking its args."""
         if self.bus is None:
             return
+        if on_clipboard:
+            handlers["ClipboardChanged"] = on_clipboard
 
         def got(_c, _sender, _path, _iface, signal, params):
-            if signal == "ClipboardChanged":
-                mimes, ours = params.unpack()
-                on_clipboard(mimes, ours)
-            elif signal == "HotKey" and on_hotkey:
-                on_hotkey(params.unpack()[0])
+            fn = handlers.get(signal)
+            if fn:
+                fn(*(params.unpack() if params else ()))
 
         self.bus.signal_subscribe(None, IFACE, None, PATH, None, self.Gio.DBusSignalFlags.NONE, got)

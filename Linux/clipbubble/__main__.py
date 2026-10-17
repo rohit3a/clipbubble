@@ -18,25 +18,8 @@ def run_app():
             DB().prune()
             time.sleep(3600)
 
-    from . import board
-    from .capture import Capture
-    from .shell import Shell
-
-    shell = Shell()
-    engine = Engine()
-    engine.apply = lambda c: board.write(shell, c) or log(f"couldn't put {c.hash[:10]} on the clipboard")
-    Capture(shell)
-    engine.start()
-
-    def prune():
-        DB().prune()
-        return True
-
-    prune()
-    GLib.timeout_add_seconds(3600, prune)
-    loop = GLib.MainLoop()
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, loop.quit)
-    loop.run()
+    from .ui import run
+    run()
 
 
 def run_peer_stdio():

@@ -12,7 +12,8 @@ INSTRUCTIONS = (
     "plus everything synced from their other machines (their Mac and others). When they mention something they "
     "copied, a screenshot they took or \"that thing from earlier\", look it up with clipboard_history (use query, kind "
     "or source to narrow it) and read it in full with clipboard_get, which returns images so you can see them. Use "
-    "clipboard_set to hand the user something to paste."
+    "clipboard_set to hand the user something to paste. The mascot_* tools change the little character in their "
+    "ClipBubble bubble."
 )
 
 TOOLS = [
@@ -32,6 +33,30 @@ TOOLS = [
     {"name": "clipboard_set",
      "description": "Put content on the user's clipboard so they can paste it: either new text, or an existing history item by id.",
      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "id": {"type": "integer"}}}},
+    {"name": "mascot_list",
+     "description": "List the mascots available for the user's ClipBubble bubble (built-in and custom) and which one is active.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "mascot_set",
+     "description": "Switch the bubble's mascot by id (from mascot_list). The bubble updates live.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "mascot_add",
+     "description": "Create a custom mascot for the bubble and (by default) switch to it. It shows at about 34px inside a "
+                    "dark circle; it tilts when hovered, squishes when clicked and hops when something is copied. Three "
+                    "kinds: \"blob\" = the built-in creature recolored (pass color as hex); \"emoji\" = idle/hover/active "
+                    "are emoji; \"image\" = idle/hover/active are file paths (PNG, JPG, SVG) or inline SVG markup. For "
+                    "images use a square canvas with a transparent background. hover and active fall back to idle.",
+     "inputSchema": {"type": "object", "properties": {
+         "name": {"type": "string"},
+         "kind": {"type": "string", "enum": ["blob", "emoji", "image"]},
+         "color": {"type": "string", "description": "Hex color for blob, like #FF6AD5"},
+         "idle": {"type": "string", "description": "Emoji, image path, or inline SVG"},
+         "hover": {"type": "string"},
+         "active": {"type": "string", "description": "Shown when clicked or when a copy is caught"},
+         "activate": {"type": "boolean", "description": "Switch to it now (default true)"}},
+         "required": ["name", "kind"]}},
+    {"name": "mascot_remove",
+     "description": "Delete a custom mascot by id. Built-in mascots can't be removed.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
 ]
 
 
@@ -124,6 +149,41 @@ class Server:
                 return text(f"Item #{c.id}'s image or files aren't on this machine.", True)
             self.db.upsert(c.kind, c.text, c.file, c.source, c.hash)
             return text(f"Copied item #{c.id} to the clipboard.")
+        if name.startswith("mascot_"):
+            return self.mascot(name, a)
+        return text(f"Unknown tool {name}.", True)
+
+    def mascot(self, name, a):
+        from . import mascots
+        if name == "mascot_list":
+            active, custom = mascots.active_id(), {m["id"] for m in mascots.custom()}
+            lines = []
+            for m in mascots.all_():
+                line = f"{m['id']} · {m['name']} · {m['kind']}" + (" · custom" if m["id"] in custom else "")
+                if m.get("color"):
+                    line += " · " + m["color"]
+                if m["kind"] == "emoji" and m.get("idle"):
+                    line += " · " + m["idle"]
+                lines.append(line + ("  ← active" if m["id"] == active else ""))
+            return text("\n".join(lines))
+        if name == "mascot_set":
+            if not any(m["id"] == a.get("id") for m in mascots.all_()):
+                return text("No mascot with that id. Use mascot_list.", True)
+            mascots.set_active(a["id"])
+            return text(f"Mascot set to {a['id']}.")
+        if name == "mascot_add":
+            try:
+                m = mascots.add(a.get("name") or "Mascot", a.get("kind") or "", a.get("color"),
+                                {k: a[k] for k in ("idle", "hover", "active") if isinstance(a.get(k), str)})
+            except mascots.MascotError as e:
+                return text(str(e), True)
+            if a.get("activate", True):
+                mascots.set_active(m["id"])
+            return text(f"Added mascot {m['id']}.")
+        if name == "mascot_remove":
+            if not mascots.remove(a.get("id") or ""):
+                return text("No custom mascot with that id.", True)
+            return text(f"Removed mascot {a['id']}.")
         return text(f"Unknown tool {name}.", True)
 
     def run(self):
