@@ -26,9 +26,10 @@ final class Model: ObservableObject {
     @Published var pressed = false
     @Published var hoverTicks = 0
     @Published var bubbleHover = false {
-        didSet { if bubbleHover && !oldValue { hoverTicks += 1 }; hoverChanged() }
+        didSet { if bubbleHover && !oldValue { hoverTicks += 1 }; if bubbleHover != oldValue { hoverChanged() } }
     }
-    @Published var peekHover = false { didSet { hoverChanged() } }
+    // Only real changes reach hoverChanged: hidePeek clears this, and a repeat would schedule hidePeek again, forever.
+    @Published var peekHover = false { didSet { if peekHover != oldValue { hoverChanged() } } }
     @Published var links: [String: LinkState] = [:]
     @Published var syncPaused = SyncEngine.paused
     @Published var devices: [String: String] = [:]
@@ -1264,7 +1265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restBubble() {
-        if !panel.isVisible && !peek.isVisible && !model.bubbleHover && !model.pulse {
+        if !panel.isVisible && !peek.isVisible && !model.bubbleHover && !model.pulse && abs(bubble.alphaValue - Self.idleAlpha) > 0.01 {
             bubble.animator().alphaValue = Self.idleAlpha
         }
     }
@@ -1352,7 +1353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func hidePeek() {
         peekWork?.cancel()
-        model.peekHover = false
+        if model.peekHover { model.peekHover = false }   // a repeat would still redraw every view of the model
         guard peek.isVisible else { return }
         peek.orderOut(nil)
         restBubble()
