@@ -106,7 +106,7 @@ enum MCP {
             case "initialize":
                 reply(id, ["protocolVersion": params["protocolVersion"] as? String ?? "2025-06-18",
                            "capabilities": ["tools": [String: Any]()],
-                           "serverInfo": ["name": "clipbubble", "version": "1.3.0"],
+                           "serverInfo": ["name": "clipbubble", "version": "1.5.0"],
                            "instructions": instructions])
             case "tools/list": reply(id, ["tools": tools])
             case "tools/call": reply(id, call(params["name"] as? String ?? "", params["arguments"] as? [String: Any] ?? [:]))
