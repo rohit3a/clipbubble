@@ -1139,7 +1139,7 @@ static class Program
     }
 
     /// Settings needs an App for its shortcut label; WPF allows one per process. Closing a test window mustn't end it.
-    static readonly Lazy<App> TestApp = new(() => new App { ShutdownMode = ShutdownMode.OnExplicitShutdown });
+    static readonly Lazy<App> TestApp = new(() => new App { ShutdownMode = ShutdownMode.OnExplicitShutdown, Headless = true });
 
     static IEnumerable<DependencyObject> Descendants(DependencyObject root) =>
         LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>().SelectMany(c => new[] { c }.Concat(Descendants(c)));

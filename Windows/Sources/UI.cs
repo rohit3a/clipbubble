@@ -1921,6 +1921,8 @@ sealed class App : Application
 {
     const double IdleAlpha = 0.4, Margin = 10;
     readonly Model model = new();
+    /// Tests make an App only to host Settings. WPF still starts it on the first dispatcher pump; this keeps the bubble, capture and sync from starting.
+    public bool Headless { get; init; }
     FloatingWindow bubble = null!, panel = null!, peek = null!;
     BubbleView face = null!;
     Capture capture = null!;
@@ -1943,6 +1945,7 @@ sealed class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (Headless) return;
         // A bug in one handler shouldn't make the bubble disappear: it's logged and the app carries on.
         DispatcherUnhandledException += (_, x) => { Log.Error(x.Exception); x.Handled = true; };
         AppDomain.CurrentDomain.UnhandledException += (_, x) => { if (x.ExceptionObject is Exception ex) Log.Error(ex); };
