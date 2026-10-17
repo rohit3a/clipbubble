@@ -23,6 +23,7 @@ FRAMES = {
     "applied": (sync.APPLIED, "t:01"),
     "ping": (sync.PING, 1792000005.125),
     "pong": (sync.PONG, 1792000005.125),
+    "offer": (sync.OFFER, "f:9"),
 }
 
 

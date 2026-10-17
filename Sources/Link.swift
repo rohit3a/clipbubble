@@ -15,6 +15,8 @@ final class SyncEngine {
     /// Main thread: an item arrived (for the bubble), or a link's state changed (for Settings).
     var onReceived: () -> Void = {}
     var onStatus: () -> Void = {}
+    /// Main thread: files moving right now, about four times a second while any are.
+    var onTransfers: ([String: Transfer]) -> Void = { _ in }
 
     private lazy var db = DB()
     private var sessions: [Session] = []
@@ -24,6 +26,10 @@ final class SyncEngine {
     private var hooked = false
     /// When each outgoing item was sent, to log copy-to-applied latency.
     private var sentAt: [String: Double] = [:]
+    /// Items you pressed Get on: they download whatever their size, again after a dropped link.
+    private var wanted: Set<String> = []
+    private var progressTimer: DispatchSourceTimer?
+    private var lastTransfers: [String: Transfer] = [:]
 
     private init() {
         let idFile = Paths.dir.appendingPathComponent("device-id")
@@ -60,6 +66,65 @@ final class SyncEngine {
     /// Tries a host again now, say right after setting it up.
     func redial(_ alias: String) { queue.async { self.links[alias]?.redial() } }
 
+    // MARK: Manual transfers
+
+    /// Get: downloads an item that's still on another device, whatever its size.
+    func get(_ hash: String) {
+        queue.async { [self] in
+            wanted.insert(hash)
+            guard let s = sessions.first(where: { $0.offered[hash] != nil }), let e = s.offered[hash] else { return }
+            s.download(makeDownload(e, from: s, apply: false))
+            watchTransfers()
+        }
+    }
+
+    /// Send to: asks a linked device to fetch one of this machine's items now.
+    func send(_ hash: String, toDevice device: String) {
+        queue.async { [self] in
+            guard let s = sessions.first(where: { $0.peer?.device == device && $0.summarized }) else { return }
+            if let st = db.stamp(hash: hash), st.beats(s.known[hash]) { send(st, to: s) }
+            s.send(.offer(hash: hash))
+        }
+    }
+
+    /// Stops a transfer either way and throws away what arrived.
+    func cancelTransfer(_ hash: String) {
+        queue.async { [self] in
+            wanted.remove(hash)
+            for s in sessions where s.isTransferring(hash) {
+                s.cancelDownload(hash)
+                s.cancelUpload(hash)
+                s.send(.cancel(hash: hash))
+            }
+            publishTransfers()
+        }
+    }
+
+
+    private func makeDownload(_ e: Entry, from s: Session, apply: Bool) -> Download {
+        Download(hash: e.hash, kind: e.kind, names: e.blobs.map(\.name), shas: e.blobs.map(\.sha), sizes: e.blobs.map(\.size),
+                 from: s.peer?.name ?? "Device", apply: apply)
+    }
+
+    /// Progress ticks only while something is moving, so an idle link costs nothing.
+    func watchTransfers() {
+        guard progressTimer == nil else { return publishTransfers() }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: 0.25)
+        t.setEventHandler { [weak self] in self?.publishTransfers() }
+        progressTimer = t
+        t.resume()
+    }
+
+    private func publishTransfers() {
+        var all: [String: Transfer] = [:]
+        for s in sessions { all.merge(s.transfers()) { a, _ in a } }
+        if all.isEmpty { progressTimer?.cancel(); progressTimer = nil }
+        guard all != lastTransfers else { return }
+        lastTransfers = all
+        DispatchQueue.main.async { self.onTransfers(all) }
+    }
+
     func setPaused(_ paused: Bool) {
         UserDefaults.standard.set(paused, forKey: "sync.paused")
         queue.async { [self] in
@@ -86,10 +151,14 @@ final class SyncEngine {
         publishStatus()
     }
 
+    /// Devices linked right now, for Send to. Read on the main thread.
+    private(set) var linked: [Hello] = []
+
     func publishStatus() {
         var s: [String: LinkState] = [:]
         for (alias, link) in links { s[alias] = link.state }
-        DispatchQueue.main.async { self.statuses = s; self.onStatus() }
+        let peers = sessions.compactMap(\.peer)
+        DispatchQueue.main.async { self.statuses = s; self.linked = peers; self.onStatus() }
     }
 
     /// Wake and network changes redial right away instead of waiting out the backoff.
@@ -227,6 +296,7 @@ final class SyncEngine {
                 s.send(.cancel(hash: hash))
                 return
             }
+            watchTransfers()
         case .chunk(let hash, let index, let offset, let total, let bytes):
             if let done = s.chunk(hash: hash, index: index, offset: offset, total: total, bytes: bytes) { finished(done, from: s) }
         case .cancel(let hash):
@@ -240,6 +310,10 @@ final class SyncEngine {
             s.send(.pong(t))
         case .pong:
             break
+        case .offer(let hash):
+            guard let e = s.offered[hash], db.clip(hash: hash)?.remote == true else { return }
+            s.download(makeDownload(e, from: s, apply: false))
+            watchTransfers()
         }
     }
 
@@ -264,9 +338,12 @@ final class SyncEngine {
             if e.blobs.isEmpty, fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
         }
         // Still missing its bytes, whether new here or left over from a link that dropped mid-download.
-        if !e.blobs.isEmpty, e.size <= Sync.autoFetchLimit, db.clip(hash: e.hash)?.remote == true {
-            s.download(Download(hash: e.hash, kind: e.kind, names: e.blobs.map(\.name), shas: e.blobs.map(\.sha),
-                                from: s.peer?.name ?? "Device", apply: fresh))
+        if !e.blobs.isEmpty, db.clip(hash: e.hash)?.remote == true {
+            s.offered[e.hash] = e
+            if e.size <= Sync.autoFetchLimit || wanted.contains(e.hash) {
+                s.download(makeDownload(e, from: s, apply: fresh))
+                watchTransfers()
+            }
         }
         notifyUI()
     }
@@ -277,6 +354,8 @@ final class SyncEngine {
     }
 
     private func finished(_ d: Download, from s: Session) {
+        wanted.remove(d.hash)
+        s.offered[d.hash] = nil
         if d.kind == "image" { db.received(hash: d.hash, file: d.paths.first, text: nil) }
         else { db.received(hash: d.hash, file: nil, text: d.paths.joined(separator: "\n")) }
         // Still the newest item once the bytes are here: put it on the clipboard.
@@ -465,6 +544,8 @@ final class Session {
     var summarized = false
     /// The latest event the peer is known to have per hash, so nothing is sent twice or echoed back.
     var known: [String: Stamp] = [:]
+    /// Items the peer has bytes for that haven't come over yet, with their blob sizes, for Get and Send to.
+    var offered: [String: Entry] = [:]
     private var reader = FrameReader()
     private var downloads: [String: Download] = [:]
     private var pendingDownloads: [Download] = []
@@ -551,6 +632,23 @@ final class Session {
         lock.unlock()
     }
 
+    func isTransferring(_ hash: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return downloads[hash] != nil || pendingDownloads.contains { $0.hash == hash } || uploads.contains { $0.hash == hash }
+    }
+
+    func transfers() -> [String: Transfer] {
+        let name = peer?.name ?? "Device"
+        var out: [String: Transfer] = [:]
+        for d in downloads.values { out[d.hash] = Transfer(done: d.doneBytes, total: d.total, peer: name, sending: false) }
+        for d in pendingDownloads { out[d.hash] = Transfer(done: d.doneBytes, total: d.total, peer: name, sending: false) }
+        lock.lock()
+        for u in uploads { out[u.hash] = Transfer(done: u.sent, total: u.total, peer: name, sending: true) }
+        lock.unlock()
+        return out
+    }
+
     // Downloads run one at a time per peer, so a backlog can't flood the link.
 
     func download(_ d: Download) {
@@ -606,7 +704,8 @@ final class Session {
         input.readabilityHandler = nil
         try? output.close()
         try? input.close()
-        downloads.values.forEach { $0.discard() }
+        // Partial files stay, so the next link resumes them from where this one stopped.
+        downloads.values.forEach { $0.suspend() }
         downloads.removeAll()
         engine.ended(self)
         onClose()
@@ -619,7 +718,8 @@ final class Upload {
     let index: Int
     private let handle: FileHandle
     private var offset: Int64
-    private let total: Int64
+    let total: Int64
+    var sent: Int64 { offset }
     private var sentEmpty = false
     var done: Bool { offset >= total && (total > 0 || sentEmpty) }
 
@@ -656,30 +756,41 @@ final class Download {
     let kind: String
     let names: [String]
     let shas: [String]
+    let sizes: [Int64]
     let from: String
     let apply: Bool
+    var total: Int64 { sizes.reduce(0, +) }
+    var doneBytes: Int64 { sizes.prefix(index).reduce(0, +) + received }
     private(set) var index = 0
     private(set) var received: Int64 = 0
     private(set) var paths: [String] = []
     private var handle: FileHandle?
     private var temp: URL { Paths.dir.appendingPathComponent("incoming/\(sha(hash))-\(index)") }
 
-    init(hash: String, kind: String, names: [String], shas: [String], from: String, apply: Bool) {
+    init(hash: String, kind: String, names: [String], shas: [String], sizes: [Int64], from: String, apply: Bool) {
         self.hash = hash
         self.kind = kind
         self.names = names
         self.shas = shas
+        self.sizes = sizes
         self.from = from
         self.apply = apply
+        // A partial first file from a link that dropped: carry on from its end.
+        if let size = (try? FileManager.default.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.int64Value,
+           size <= sizes.first ?? 0 {
+            received = size
+        }
     }
 
     func write(_ bytes: Data, total: Int64) -> Step {
         guard index < names.count, received + Int64(bytes.count) <= total else { return .failed }
         if handle == nil {
             try? FileManager.default.createDirectory(at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
-            FileManager.default.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            if !FileManager.default.fileExists(atPath: temp.path) {
+                FileManager.default.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            }
             handle = FileHandle(forWritingAtPath: temp.path)
-            try? handle?.seek(toOffset: UInt64(received))
+            try? handle?.truncate(atOffset: UInt64(received))
         }
         guard let h = handle, (try? h.write(contentsOf: bytes)) != nil else { return .failed }
         received += Int64(bytes.count)
@@ -713,11 +824,24 @@ final class Download {
         return dest.path
     }
 
-    func discard() {
+    func suspend() {
         try? handle?.close()
         handle = nil
+    }
+
+    func discard() {
+        suspend()
         try? FileManager.default.removeItem(at: temp)
     }
+}
+
+/// A file moving between devices, for progress in the panel.
+struct Transfer: Equatable {
+    var done: Int64
+    var total: Int64
+    var peer: String
+    var sending: Bool
+    var fraction: Double { total > 0 ? min(1, Double(done) / Double(total)) : 0 }
 }
 
 /// Where files from another device land.

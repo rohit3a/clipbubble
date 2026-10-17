@@ -17,6 +17,7 @@ let fixtureFrames: [(String, Frame)] = [
     ("applied", .applied(hash: "t:01")),
     ("ping", .ping(1792000005.125)),
     ("pong", .pong(1792000005.125)),
+    ("offer", .offer(hash: "f:9")),
 ]
 
 func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }

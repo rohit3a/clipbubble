@@ -14,7 +14,9 @@ func runChild() -> Never {
     }
     let minuteAgo = Date().addingTimeInterval(-60)
     if let t = env["SEED_TEXT"] { db.insertIfMissing(kind: "text", text: t, source: "Terminal", hash: "t:" + sha(t), created: minuteAgo) }
-    if let f = env["SEED_FILE"] { db.insertIfMissing(kind: "file", text: f, source: "Files", hash: "f:" + sha(f), created: minuteAgo) }
+    for key in ["SEED_FILE", "SEED_BIG"] {
+        if let f = env[key] { db.insertIfMissing(kind: "file", text: f, source: "Files", hash: "f:" + sha(f), created: minuteAgo) }
+    }
     let applied = Paths.dir.appendingPathComponent("applied.txt")
     SyncEngine.shared.apply = { c in
         let h = FileHandle(forWritingAtPath: applied.path) ?? { FileManager.default.createFile(atPath: applied.path, contents: nil); return FileHandle(forWritingAtPath: applied.path)! }()
@@ -36,7 +38,7 @@ private func waitFor(_ what: String, seconds: Double = 8, _ cond: () -> Bool) ->
     let end = Date().addingTimeInterval(seconds)
     while Date() < end {
         if cond() { return true }
-        usleep(50_000)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))   // lets main-thread callbacks like onTransfers run
     }
     print("timed out waiting for \(what)")
     return false
@@ -68,10 +70,16 @@ func linkTests() {
     let big = testHome.appendingPathComponent("big file.bin")
     let bigData = Data((0..<600_000).map { UInt8(truncatingIfNeeded: $0 &* 31) })
     try? bigData.write(to: big)
+    // Over 25 MB: these wait for Get on this side and Send to from this side.
+    let huge = testHome.appendingPathComponent("huge.bin"), hugeHere = testHome.appendingPathComponent("huge here.bin")
+    let hugeData = Data((0..<(26 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ $0 >> 13) })
+    try? hugeData.write(to: huge)
+    try? Data(hugeData.reversed()).write(to: hugeHere)
+    db.upsert(kind: "file", text: hugeHere.path, file: nil, source: "Finder", hash: "f:" + sha(hugeHere.path))
 
     let p = Process()
     p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    p.environment = childEnv(peerHome, ["CLIPBUBBLE_CHILD": "serve", "SEED_TEXT": "peer-old", "SEED_FILE": big.path])
+    p.environment = childEnv(peerHome, ["CLIPBUBBLE_CHILD": "serve", "SEED_TEXT": "peer-old", "SEED_FILE": big.path, "SEED_BIG": huge.path])
     let toChild = Pipe(), fromChild = Pipe()
     p.standardInput = toChild
     p.standardOutput = fromChild
@@ -113,6 +121,34 @@ func linkTests() {
     db.upsert(kind: "image", text: "", file: imgPath.path, source: "Preview", hash: "i:" + sha(png))
     check(waitFor("peer applies image") { (try? String(contentsOf: appliedFile, encoding: .utf8))?.contains("i:" + sha(png)) ?? false },
           "a new image lands on the peer's clipboard once its bytes arrive")
+
+    // Over 25 MB waits for Get, and picks up a partial file a dropped link left behind.
+    let hugeHash = "f:" + sha(huge.path)
+    check(waitFor("huge offered") { db.clip(hash: hugeHash) != nil }, "a file over 25 MB is listed")
+    usleep(500_000)
+    check(db.clip(hash: hugeHash)?.remote == true, "but doesn't download on its own")
+    let partial = Paths.dir.appendingPathComponent("incoming/\(sha(hugeHash))-0")
+    try? FileManager.default.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
+    var head = hugeData.prefix(5 << 20)
+    head[head.startIndex] ^= 0xFF   // marks the partial file, so the result shows it was kept
+    try? head.write(to: partial)
+    var seen: [Transfer] = []
+    engine.onTransfers = { t in if let x = t[hugeHash] { seen.append(x) } }
+    engine.get(hugeHash)
+    check(waitFor("huge arrives", seconds: 30) { db.clip(hash: hugeHash)?.remote == false }, "Get downloads it")
+    let got = db.clip(hash: hugeHash)?.paths.first.flatMap { FileManager.default.contents(atPath: $0) }
+    check(got?.count == hugeData.count && got?.first == head.first && got?.dropFirst() == hugeData.dropFirst(), "it resumed from the partial file")
+    check(seen.contains { !$0.sending && $0.total == Int64(26 << 20) && $0.done >= Int64(5 << 20) }, "progress counts from the resumed offset")
+
+    // Send to: this side asks the peer to take a big file now.
+    let peerDevice = (try? String(contentsOf: peerHome.appendingPathComponent("device-id"), encoding: .utf8)) ?? ""
+    seen = []
+    engine.onTransfers = { t in if let x = t["f:" + sha(hugeHere.path)] { seen.append(x) } }
+    engine.send("f:" + sha(hugeHere.path), toDevice: peerDevice)
+    check(waitFor("upload progress", seconds: 30) { seen.contains { $0.sending && $0.total == Int64(26 << 20) } }, "sending shows progress")
+    let hugeHereFile = peerHome.appendingPathComponent("Downloads/ClipBubble/\(engine.name)/huge here.bin")
+    check(waitFor("peer gets huge", seconds: 30) { (try? FileManager.default.attributesOfItem(atPath: hugeHereFile.path)[.size] as? Int) == hugeData.count },
+          "Send to puts it on the peer")
 
     // A delete here removes it there.
     if let c = db.clip(hash: liveHash) { db.delete(id: c.id) }

@@ -67,6 +67,8 @@ enum Frame: Equatable {
     case applied(hash: String)
     case ping(Double)
     case pong(Double)
+    /// "Get this now": the sender wants the receiver to fetch an item, whatever its size.
+    case offer(hash: String)
 
     var code: UInt8 {
         switch self {
@@ -80,6 +82,7 @@ enum Frame: Equatable {
         case .applied: 8
         case .ping: 9
         case .pong: 10
+        case .offer: 11
         }
     }
 
@@ -105,7 +108,7 @@ enum Frame: Equatable {
             w.str(hash); w.u32(UInt32(index)); w.i64(offset)
         case .chunk(let hash, let index, let offset, let total, let bytes):
             w.str(hash); w.u32(UInt32(index)); w.i64(offset); w.i64(total); w.bytes(bytes)
-        case .cancel(let hash), .applied(let hash):
+        case .cancel(let hash), .applied(let hash), .offer(let hash):
             w.str(hash)
         case .ping(let t), .pong(let t):
             w.f64(t)
@@ -146,6 +149,7 @@ enum Frame: Equatable {
         case 8: f = .applied(hash: try r.str())
         case 9: f = .ping(try r.f64())
         case 10: f = .pong(try r.f64())
+        case 11: f = .offer(hash: try r.str())
         default: throw SyncError.malformed
         }
         guard r.remaining == 0 else { throw SyncError.malformed }

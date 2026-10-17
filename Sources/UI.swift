@@ -32,6 +32,8 @@ final class Model: ObservableObject {
     @Published var links: [String: LinkState] = [:]
     @Published var syncPaused = SyncEngine.paused
     @Published var devices: [String: String] = [:]
+    @Published var transfers: [String: Transfer] = [:]
+    @Published var linked: [Hello] = []
     @Published var mascot = Mascots.active()
     @Published var mascots = Mascots.all()
     let db = DB()
@@ -330,11 +332,12 @@ struct Row: View, Equatable {
     let index: Int          // ⌘1–9 hint for the first nine; pass -1 to hide
     let selected: Bool
     let tick: Int
+    let transfer: Transfer?
     let model: Model        // not observed, so a row redraws only when its own inputs change
     @State private var hover = false
 
     static func == (a: Row, b: Row) -> Bool {
-        a.clip == b.clip && a.index == b.index && a.selected == b.selected && a.tick == b.tick
+        a.clip == b.clip && a.index == b.index && a.selected == b.selected && a.tick == b.tick && a.transfer == b.transfer
     }
 
     var body: some View {
@@ -359,6 +362,18 @@ struct Row: View, Equatable {
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
+            if let t = transfer {
+                ProgressView(value: t.fraction).progressViewStyle(.linear).frame(width: 44).controlSize(.mini)
+                Button { SyncEngine.shared.cancelTransfer(clip.hash) } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain).help("Stop")
+            } else if clip.remote {
+                Button { SyncEngine.shared.get(clip.hash) } label: {
+                    Label("Get", systemImage: "arrow.down.circle").font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless).help("Download it from \(model.devices[clip.origin] ?? "the other device")")
+            }
             if index >= 0 && index < 9 {
                 Text("⌘\(index + 1)").font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(selected ? .secondary : .tertiary)
@@ -378,6 +393,16 @@ struct Row: View, Equatable {
                 Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
             }
+            if clip.remote && transfer == nil {
+                Button("Get from \(model.devices[clip.origin] ?? "other device")") { SyncEngine.shared.get(clip.hash) }
+            } else if clip.kind != "text", !clip.remote, !model.linked.isEmpty {
+                Menu("Send to") {
+                    ForEach(model.linked, id: \.device) { h in
+                        Button(h.name) { SyncEngine.shared.send(clip.hash, toDevice: h.device) }
+                    }
+                }
+            }
+            if transfer != nil { Button("Stop transfer") { SyncEngine.shared.cancelTransfer(clip.hash) } }
             Divider()
             Button("Delete") { model.delete(clip) }
         }
@@ -404,6 +429,10 @@ struct Row: View, Equatable {
     }
 
     private var subtitle: String {
+        if let t = transfer {
+            let f = ByteCountFormatter()
+            return "\(t.sending ? "Sending to" : "Getting from") \(t.peer) · \(f.string(fromByteCount: t.done)) of \(f.string(fromByteCount: t.total))"
+        }
         var parts = [clip.source, ago(clip.created)]
         if !clip.origin.isEmpty { parts.insert(model.devices[clip.origin] ?? "Other device", at: 0) }
         if clip.remote {
@@ -530,7 +559,8 @@ struct PanelView: View {
                 ScrollView {
                     LazyVStack(spacing: 1) {
                         ForEach(Array(model.clips.enumerated()), id: \.element.id) { i, c in
-                            Row(clip: c, index: i, selected: c.id == model.selection, tick: model.shown, model: model)
+                            Row(clip: c, index: i, selected: c.id == model.selection, tick: model.shown,
+                                transfer: model.transfers[c.hash], model: model)
                                 .equatable().id(c.id)
                         }
                     }
@@ -955,7 +985,7 @@ struct PeekView: View {
             if model.recent.isEmpty {
                 Text("Nothing copied yet").font(.system(size: 12)).foregroundStyle(.secondary).padding(8)
             }
-            ForEach(model.recent) { Row(clip: $0, index: -1, selected: false, tick: model.shown, model: model) }
+            ForEach(model.recent) { Row(clip: $0, index: -1, selected: false, tick: model.shown, transfer: model.transfers[$0.hash], model: model) }
         }
         .padding(6)
         .frame(width: 300)
@@ -1056,7 +1086,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
         let sync = SyncEngine.shared
         sync.onReceived = { [weak self] in self?.captured() }
-        sync.onStatus = { [weak self] in self?.model.links = sync.statuses }
+        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
+        sync.onTransfers = { [weak self] t in
+            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
+            self?.model.transfers = t
+            if finished { self?.captured() }
+        }
         sync.start()
     }
 

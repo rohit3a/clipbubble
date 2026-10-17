@@ -89,7 +89,13 @@ class Engine:
         self.apply = lambda clip: None
         self.on_received = lambda: None
         self.on_status = lambda: None
+        # Called on the engine thread with {hash: Transfer} about four times a second while files move.
+        self.on_transfers = lambda transfers: None
         self.statuses = {}
+        self.linked = []
+        self.wanted = set()
+        self.ticking = False
+        self.last_transfers = {}
         self.thread = threading.Thread(target=self._run, name="clipbubble-sync", daemon=True)
         self.thread.start()
 
@@ -147,7 +153,72 @@ class Engine:
 
     def publish_status(self):
         self.statuses = {a: l.state for a, l in self.links.items()}
+        self.linked = [s.peer for s in self.sessions if s.peer]
         self.on_status()
+
+    # Manual transfers
+
+    def get(self, h):
+        """Get: downloads an item that's still on another device, whatever its size."""
+        def go():
+            self.wanted.add(h)
+            s = next((s for s in self.sessions if h in s.offered), None)
+            if s:
+                s.download(self.make_download(s.offered[h], s, False))
+                self.watch_transfers()
+        self.post(go)
+
+    def send_to(self, h, device):
+        """Send to: asks a linked device to fetch one of this machine's items now."""
+        def go():
+            s = next((s for s in self.sessions if s.summarized and s.peer and s.peer.device == device), None)
+            if not s:
+                return
+            st = self.db.stamp(h)
+            if st and st.beats(s.known.get(h)):
+                self.send(st, s)
+            s.send((sync.OFFER, h))
+        self.post(go)
+
+    def cancel_transfer(self, h):
+        """Stops a transfer either way and throws away what arrived."""
+        def go():
+            self.wanted.discard(h)
+            for s in self.sessions:
+                if s.is_transferring(h):
+                    s.cancel_download(h)
+                    s.cancel_upload(h)
+                    s.send((sync.CANCEL, h))
+            self.publish_transfers()
+        self.post(go)
+
+    def make_download(self, e, s, apply):
+        return Download(e.hash, e.kind, [b.name for b in e.blobs], [b.sha for b in e.blobs], [b.size for b in e.blobs],
+                        s.peer.name if s.peer else "Device", apply)
+
+    def watch_transfers(self):
+        """Progress ticks only while something is moving, so an idle link costs nothing."""
+        if self.ticking:
+            return self.publish_transfers()
+        self.ticking = True
+
+        def tick():
+            while self.ticking:
+                self.post(self.publish_transfers)
+                time.sleep(0.25)
+
+        threading.Thread(target=tick, daemon=True, name="clipbubble-progress").start()
+
+    def publish_transfers(self):
+        all_ = {}
+        for s in self.sessions:
+            for h, t in s.transfers().items():
+                all_.setdefault(h, t)
+        if not all_:
+            self.ticking = False
+        if all_ != self.last_transfers:
+            self.last_transfers = all_
+            self.on_transfers(all_)
 
     def _serve_socket(self):
         path = store.socket_path()
@@ -292,6 +363,8 @@ class Engine:
             files = self.blob_files(c) if c and not c.remote else []
             if index >= len(files) or not s.upload(h, index, files[index], offset):
                 s.send((sync.CANCEL, h))
+            else:
+                self.watch_transfers()
         elif code == sync.CHUNK:
             done = s.chunk(*p)
             if done:
@@ -305,6 +378,11 @@ class Engine:
                 log(f"applied on {s.peer.name if s.peer else 'peer'} in {int((time.time() - t) * 1000)} ms")
         elif code == sync.PING:
             s.send((sync.PONG, p))
+        elif code == sync.OFFER:
+            c = self.db.clip(hash=p)
+            if p in s.offered and c and c.remote:
+                s.download(self.make_download(s.offered[p], s, False))
+                self.watch_transfers()
 
     def received(self, e, s):
         st = e.stamp
@@ -336,9 +414,11 @@ class Engine:
                 self.apply_now(self.db.clip(hash=e.hash), s)
         # Still missing its bytes, whether new here or left over from a link that dropped mid-download.
         c = self.db.clip(hash=e.hash)
-        if e.blobs and e.size <= sync.AUTO_FETCH_LIMIT and c and c.remote:
-            s.download(Download(e.hash, e.kind, [b.name for b in e.blobs], [b.sha for b in e.blobs],
-                                s.peer.name if s.peer else "Device", fresh))
+        if e.blobs and c and c.remote:
+            s.offered[e.hash] = e
+            if e.size <= sync.AUTO_FETCH_LIMIT or e.hash in self.wanted:
+                s.download(self.make_download(e, s, fresh))
+                self.watch_transfers()
         self.on_received()
 
     def apply_now(self, c, s):
@@ -346,6 +426,8 @@ class Engine:
         s.send((sync.APPLIED, c.hash))
 
     def finished(self, d, s):
+        self.wanted.discard(d.hash)
+        s.offered.pop(d.hash, None)
         if d.kind == "image":
             self.db.received(d.hash, file=d.paths[0])
         else:
@@ -511,6 +593,8 @@ class Session:
         self.offset = 0.0
         self.summarized = False
         self.known = {}
+        # Items the peer has bytes for that haven't come over yet, with their blob sizes, for Get and Send to.
+        self.offered = {}
         self.reader = sync.FrameReader()
         self.downloads = {}
         self.pending = collections.deque()
@@ -607,6 +691,19 @@ class Session:
         with self.cv:
             self.uploads = collections.deque(u for u in self.uploads if u.hash != h)
 
+    def is_transferring(self, h):
+        with self.cv:
+            up = any(u.hash == h for u in self.uploads)
+        return up or h in self.downloads or any(d.hash == h for d in self.pending)
+
+    def transfers(self):
+        name = self.peer.name if self.peer else "Device"
+        out = {d.hash: Transfer(d.done_bytes, d.total, name, False) for d in list(self.downloads.values()) + list(self.pending)}
+        with self.cv:
+            for u in self.uploads:
+                out[u.hash] = Transfer(u.offset, u.total, name, True)
+        return out
+
     def download(self, d):
         if d.hash in self.downloads or any(p.hash == d.hash for p in self.pending):
             return
@@ -663,8 +760,9 @@ class Session:
             self.closed = True
             self.uploads.clear()
             self.cv.notify_all()
+        # Partial files stay, so the next link resumes them from where this one stopped.
         for d in self.downloads.values():
-            d.discard()
+            d.suspend()
         self.downloads.clear()
         self.engine.ended(self)
         self.on_close()
@@ -699,14 +797,35 @@ class Upload:
         return frame
 
 
+class Transfer(collections.namedtuple("Transfer", "done total peer sending")):
+    @property
+    def fraction(self):
+        return min(1.0, self.done / self.total) if self.total > 0 else 0.0
+
+
 class Download:
-    def __init__(self, h, kind, names, shas, source, apply):
-        self.hash, self.kind, self.names, self.shas = h, kind, names, shas
+    def __init__(self, h, kind, names, shas, sizes, source, apply):
+        self.hash, self.kind, self.names, self.shas, self.sizes = h, kind, names, shas, sizes
         self.source, self.apply = source, apply
         self.index = 0
         self.received = 0
         self.paths = []
         self.f = None
+        # A partial first file from a link that dropped: carry on from its end.
+        try:
+            size = self.temp.stat().st_size
+            if size <= (sizes[0] if sizes else 0):
+                self.received = size
+        except OSError:
+            pass
+
+    @property
+    def total(self):
+        return sum(self.sizes)
+
+    @property
+    def done_bytes(self):
+        return sum(self.sizes[:self.index]) + self.received
 
     @property
     def temp(self):
@@ -751,10 +870,13 @@ class Download:
         shutil.move(str(self.temp), dest)
         return str(dest)
 
-    def discard(self):
+    def suspend(self):
         if self.f:
             self.f.close()
             self.f = None
+
+    def discard(self):
+        self.suspend()
         self.temp.unlink(missing_ok=True)
 
 

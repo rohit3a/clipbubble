@@ -63,9 +63,9 @@ class Hello:
 
 
 # Frames are (name, fields...) tuples, with the same names as the Swift enum.
-HELLO, SUMMARY, PUT, TOMBSTONE, FETCH, CHUNK, CANCEL, APPLIED, PING, PONG = range(1, 11)
+HELLO, SUMMARY, PUT, TOMBSTONE, FETCH, CHUNK, CANCEL, APPLIED, PING, PONG, OFFER = range(1, 12)
 NAMES = {1: "hello", 2: "summary", 3: "put", 4: "tombstone", 5: "fetch", 6: "chunk",
-         7: "cancel", 8: "applied", 9: "ping", 10: "pong"}
+         7: "cancel", 8: "applied", 9: "ping", 10: "pong", 11: "offer"}
 
 
 def is_bulk(frame):
@@ -95,7 +95,7 @@ class _W:
 
 def encode(frame):
     """frame is (code, payload): hello Hello, summary [Stamp], put Entry, tombstone Stamp,
-    fetch (hash, index, offset), chunk (hash, index, offset, total, data), cancel/applied hash, ping/pong float."""
+    fetch (hash, index, offset), chunk (hash, index, offset, total, data), cancel/applied/offer hash, ping/pong float."""
     code, p = frame
     w = _W()
     w.u8(code)
@@ -116,7 +116,7 @@ def encode(frame):
         w.str(p[0]); w.u32(p[1]); w.i64(p[2])
     elif code == CHUNK:
         w.str(p[0]); w.u32(p[1]); w.i64(p[2]); w.i64(p[3]); w.bytes(p[4])
-    elif code in (CANCEL, APPLIED):
+    elif code in (CANCEL, APPLIED, OFFER):
         w.str(p)
     elif code in (PING, PONG):
         w.f64(p)
@@ -193,7 +193,7 @@ def decode(body):
         p = (r.str(), r.u32(), r.i64())
     elif code == CHUNK:
         p = (r.str(), r.u32(), r.i64(), r.i64(), r.bytes())
-    elif code in (CANCEL, APPLIED):
+    elif code in (CANCEL, APPLIED, OFFER):
         p = r.str()
     elif code in (PING, PONG):
         p = r.f64()

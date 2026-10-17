@@ -32,8 +32,12 @@ class SwiftPeer(unittest.TestCase):
         big_data = bytes((i * 31) & 0xFF for i in range(600_000))
         big.write_bytes(big_data)
         live_there = f"mac live {time.time()}"
+        huge, huge_here = Path(HOME) / "huge.bin", Path(HOME) / "huge here.bin"
+        huge_data = os.urandom(26 << 20)
+        huge.write_bytes(huge_data)
+        huge_here.write_bytes(huge_data[::-1])
         env = dict(os.environ, CLIPBUBBLE_HOME=str(peer_home), CLIPBUBBLE_DOWNLOADS=str(peer_home / "Downloads"),
-                   CLIPBUBBLE_DEVICE_NAME="Mac", CLIPBUBBLE_CHILD="serve", SEED_TEXT="mac-old", SEED_FILE=str(big),
+                   CLIPBUBBLE_DEVICE_NAME="Mac", CLIPBUBBLE_CHILD="serve", SEED_TEXT="mac-old", SEED_FILE=str(big), SEED_BIG=str(huge),
                    LIVE_TEXT=live_there)
 
         db = DB()
@@ -41,7 +45,10 @@ class SwiftPeer(unittest.TestCase):
         # Left from a link that dropped mid-download: the row is here, the bytes aren't.
         db.insert(Entry("f:" + sha(str(big)), time.time() - 1, "file", "big file.bin", "Files", "mac-device",
                         (Blob("big file.bin", len(big_data), ""),)), "mac-device")
+        db.upsert("file", str(huge_here), None, "Files", "f:" + sha(str(huge_here)))
         e = eng.Engine()
+        seen = []
+        e.on_transfers = lambda t: seen.extend(t.items())
         applied = []
         e.apply = lambda c: applied.append(c.hash)
 
@@ -73,6 +80,27 @@ class SwiftPeer(unittest.TestCase):
         img.write_bytes(png)
         db.upsert("image", "", str(img), "Screenshot", "i:" + sha(png))
         self.assertTrue(wait_for(lambda: "i:" + sha(png) in applied_there.read_text()), "an image lands on the Mac")
+
+        # Over 25 MB waits for Get, and resumes a partial file a dropped link left behind.
+        hh = "f:" + sha(str(huge))
+        self.assertTrue(wait_for(lambda: db.exists(hh)))
+        time.sleep(0.5)
+        self.assertTrue(db.clip(hash=hh).remote, "a file over 25 MB doesn't download on its own")
+        partial = eng.DIR / "incoming" / f"{sha(hh)}-0"
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        head = bytes([huge_data[0] ^ 0xFF]) + huge_data[1:5 << 20]
+        partial.write_bytes(head)
+        e.get(hh)
+        self.assertTrue(wait_for(lambda: not db.clip(hash=hh).remote, 30), "Get downloads it")
+        got = Path(db.clip(hash=hh).paths[0]).read_bytes()
+        self.assertEqual((got[:1], got[1:]), (head[:1], huge_data[1:]), "it resumed from the partial file")
+        self.assertTrue(any(h == hh and not t.sending and t.total == 26 << 20 for h, t in seen), "progress is reported")
+
+        # Send to: this side asks the Mac to take a big file now.
+        e.send_to("f:" + sha(str(huge_here)), (peer_home / "device-id").read_text().strip())
+        there = peer_home / "Downloads/ClipBubble/Linux test/huge here.bin"
+        self.assertTrue(wait_for(lambda: there.exists() and there.stat().st_size == len(huge_data), 30), "Send to puts it on the Mac")
+        self.assertTrue(any(t.sending for _, t in seen), "sending shows progress")
 
         db.delete(hash="t:" + sha(live))
         time.sleep(0.7)
