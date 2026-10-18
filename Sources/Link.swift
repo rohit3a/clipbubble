@@ -17,6 +17,8 @@ final class SyncEngine {
     var onStatus: () -> Void = {}
     /// Main thread: files moving right now, about four times a second while any are.
     var onTransfers: ([String: Transfer]) -> Void = { _ in }
+    /// Main thread: a device put one of this machine's items on its clipboard, with that device's name.
+    var onApplied: (String, String) -> Void = { _, _ in }
 
     private lazy var db = DB()
     private var sessions: [Session] = []
@@ -45,8 +47,8 @@ final class SyncEngine {
 
     // MARK: Hosts
 
-    static var enabledHosts: [String] { UserDefaults.standard.stringArray(forKey: "sync.hosts") ?? [] }
-    static var paused: Bool { UserDefaults.standard.bool(forKey: "sync.paused") }
+    static var enabledHosts: [String] { Platform.defaults.stringArray(forKey: "sync.hosts") ?? [] }
+    static var paused: Bool { Platform.defaults.bool(forKey: "sync.paused") }
 
     /// Called at launch: listens for peers (no CPU while idle) and dials the hosts switched on.
     func start() {
@@ -59,7 +61,7 @@ final class SyncEngine {
     func setHost(_ alias: String, on: Bool) {
         var hosts = Self.enabledHosts.filter { $0 != alias }
         if on { hosts.append(alias) }
-        UserDefaults.standard.set(hosts, forKey: "sync.hosts")
+        Platform.defaults.set(hosts, forKey: "sync.hosts")
         queue.async { self.reconcileLinks() }
     }
 
@@ -126,7 +128,7 @@ final class SyncEngine {
     }
 
     func setPaused(_ paused: Bool) {
-        UserDefaults.standard.set(paused, forKey: "sync.paused")
+        Platform.defaults.set(paused, forKey: "sync.paused")
         queue.async { [self] in
             if paused { sessions.forEach { $0.close() } }
             reconcileLinks()
@@ -304,6 +306,8 @@ final class SyncEngine {
             s.cancelUpload(hash)
             s.cancelDownload(hash)
         case .applied(let hash):
+            let peer = s.peer?.name ?? "peer"
+            DispatchQueue.main.async { self.onApplied(hash, peer) }
             if let t = sentAt.removeValue(forKey: hash) {
                 SyncLog.write("applied on \(s.peer?.name ?? "peer") in \(Int((Date().timeIntervalSince1970 - t) * 1000)) ms")
             }
@@ -427,8 +431,8 @@ final class HostLink {
     private(set) var state: LinkState = .connecting
 
     private var windows: Bool {
-        get { UserDefaults.standard.string(forKey: "sync.os." + alias) == "windows" }
-        set { UserDefaults.standard.set(newValue ? "windows" : "posix", forKey: "sync.os." + alias) }
+        get { Platform.defaults.string(forKey: "sync.os." + alias) == "windows" }
+        set { Platform.defaults.set(newValue ? "windows" : "posix", forKey: "sync.os." + alias) }
     }
 
     init(alias: String, engine: SyncEngine) {

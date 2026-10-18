@@ -27,7 +27,7 @@ func sha(_ s: String) -> String { sha(Data(s.utf8)) }
 enum Paths {
     /// `CLIPBUBBLE_HOME` points tests and a second local instance at their own data.
     static let dir = ProcessInfo.processInfo.environment["CLIPBUBBLE_HOME"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ClipBubble")
+        ?? Platform.dataDir
     static let images = dir.appendingPathComponent("images")
     static let db = dir.appendingPathComponent("clips.sqlite")
 }
@@ -315,7 +315,7 @@ enum Prefs {
               sql: "source = 'Downloads'"),
         .init(key: "iphone", title: "Copies from iPhone", icon: "iphone", detail: "Through Universal Clipboard", sql: "source = 'iPhone'"),
     ]
-    static func on(_ key: String) -> Bool { UserDefaults.standard.object(forKey: "save." + key) as? Bool ?? true }
-    static func set(_ key: String, _ value: Bool) { UserDefaults.standard.set(value, forKey: "save." + key) }
+    static func on(_ key: String) -> Bool { Platform.defaults.object(forKey: "save." + key) as? Bool ?? true }
+    static func set(_ key: String, _ value: Bool) { Platform.defaults.set(value, forKey: "save." + key) }
     static var hiddenSQL: String { categories.filter { !on($0.key) }.map { " AND NOT (\($0.sql))" }.joined() }
 }

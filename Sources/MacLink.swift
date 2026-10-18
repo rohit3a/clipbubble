@@ -4,6 +4,8 @@ import AppKit
 enum Platform {
     static let os = "macos"
     static var deviceName: String { Host.current().localizedName ?? "Mac" }
+    static let dataDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ClipBubble")
+    static let defaults = UserDefaults.standard
     static var downloads: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
