@@ -64,7 +64,7 @@ sealed record LinkState(string Kind, string Arg = "", double At = 0)
 
 sealed class Engine
 {
-    public const string Version = "1.5.0";
+    public const string Version = "1.6.0";
     public static double Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
     /// Where files from other devices go: Downloads\ClipBubble\<device>. The app sets the real Downloads folder.
