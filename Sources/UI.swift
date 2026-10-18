@@ -1061,6 +1061,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.hoverChanged = { [weak self] in self?.updatePeek() }
 
         capture = Capture { [weak self] in DispatchQueue.main.async { self?.captured() } }
+        // Before the folder watchers: a pending privacy prompt for a folder mustn't keep linked devices waiting.
+        let sync = SyncEngine.shared
+        sync.onReceived = { [weak self] in self?.captured() }
+        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
+        sync.onTransfers = { [weak self] t in
+            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
+            self?.model.transfers = t
+            if finished { self?.captured() }
+        }
+        sync.start()
         syncScreenshots()
         syncDownloads()
         model.prefsChanged = { [weak self] in self?.syncScreenshots(); self?.syncDownloads(); self?.importFolders() }
@@ -1085,15 +1095,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in self?.handleKey(e) ?? e }
         registerHotKey()
-        let sync = SyncEngine.shared
-        sync.onReceived = { [weak self] in self?.captured() }
-        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
-        sync.onTransfers = { [weak self] t in
-            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
-            self?.model.transfers = t
-            if finished { self?.captured() }
-        }
-        sync.start()
     }
 
     /// Every screenshot lands in history; copying it to the clipboard as well is optional.
