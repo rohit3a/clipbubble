@@ -260,9 +260,12 @@ final class SyncEngine {
                 s.close()
                 return
             }
-            guard h.device != device, !sessions.contains(where: { $0 !== s && $0.peer?.device == h.device }) else {
-                s.close()
-                return
+            guard h.device != device else { s.close(); return }
+            if let old = sessions.first(where: { $0 !== s && $0.peer?.device == h.device }) {
+                // A device dialling in again has given up on its old link (an iPhone that slept): the new one replaces it.
+                // Otherwise the two ends dialled each other, and the first link stays.
+                guard old.link == nil, s.link == nil else { s.close(); return }
+                old.close()
             }
             s.peer = h
             s.offset = h.clock - Date().timeIntervalSince1970

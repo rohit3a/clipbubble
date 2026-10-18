@@ -346,7 +346,14 @@ sealed class Engine
                     s.Close();
                     return;
                 }
-                if (p.Device == Device || Sessions.Any(o => o != s && o.Peer?.Device == p.Device)) { s.Close(); return; }
+                if (p.Device == Device) { s.Close(); return; }
+                if (Sessions.FirstOrDefault(o => o != s && o.Peer?.Device == p.Device) is { } old)
+                {
+                    // A device dialling in again has given up on its old link (an iPhone that slept): the new one replaces it.
+                    // Otherwise the two ends dialled each other, and the first link stays.
+                    if (old.Link != null || s.Link != null) { s.Close(); return; }
+                    old.Close();
+                }
                 s.Peer = p;
                 s.Offset = p.Clock - Now;
                 if (Math.Abs(s.Offset) > 30) SyncLog.Write($"{p.Name}'s clock is {(int)s.Offset} s off");

@@ -113,3 +113,26 @@ class SwiftPeer(unittest.TestCase):
         self.assertIn("deleted|t:" + sha(live), lines, "the delete reached the Mac")
         self.assertTrue(any(l.startswith("clip|i:" + sha(png) + "|") and l.endswith("|false|true") for l in lines),
                         "the image is stored on the Mac")
+
+    def test_same_device_dialling_again_replaces_its_link(self):
+        peer_home = Path(HOME) / "swift-redial"
+        peer_home.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, CLIPBUBBLE_HOME=str(peer_home), CLIPBUBBLE_DEVICE_NAME="Phone", CLIPBUBBLE_CHILD="serve")
+        e = eng.Engine()
+        e.apply = lambda c: None
+
+        def dial_in():
+            p = subprocess.Popen([str(SWIFT)], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            s = eng.Session(os.dup(p.stdout.fileno()), os.dup(p.stdin.fileno()), e)
+            p.stdout.close()
+            p.stdin.close()
+            e.post(lambda: e.begin(s))
+            return p, s
+
+        first, _ = dial_in()
+        self.assertTrue(wait_for(lambda: any(x.peer and x.peer.name == "Phone" for x in e.sessions)), "the device links")
+        second, s2 = dial_in()
+        self.assertTrue(wait_for(lambda: first.poll() is not None), "dialling in again closes its old link")
+        self.assertTrue(wait_for(lambda: s2.peer is not None and s2 in e.sessions), "and keeps the new one")
+        e.post(s2.close)
+        second.wait(timeout=10)
