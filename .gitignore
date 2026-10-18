@@ -4,3 +4,8 @@ ClipBubble.app/
 .claude/
 .codex-*
 .build/
+iOS/ClipBubble.xcodeproj/
+iOS/**/Info.plist
+iOS/Info.plist
+iOS/*.entitlements
+iOS/build/
