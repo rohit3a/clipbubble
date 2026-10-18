@@ -321,9 +321,17 @@ class Engine:
                     s.link.mismatch = p.version
                 s.close()
                 return
-            if p.device == self.device or any(o is not s and o.peer and o.peer.device == p.device for o in self.sessions):
+            if p.device == self.device:
                 s.close()
                 return
+            old = next((o for o in self.sessions if o is not s and o.peer and o.peer.device == p.device), None)
+            if old:
+                # A device dialling in again has given up on its old link (an iPhone that slept): the new one replaces it.
+                # Otherwise the two ends dialled each other, and the first link stays.
+                if old.link or s.link:
+                    s.close()
+                    return
+                old.close()
             s.peer = p
             s.offset = p.clock - time.time()
             if abs(s.offset) > 30:

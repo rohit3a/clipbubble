@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import Network
 
 /// Links this Mac's history with ClipBubble on other machines over SSH (docs/sync-protocol.md).
@@ -11,17 +11,19 @@ final class SyncEngine {
     let name: String
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     /// Puts a synced item on the clipboard. Tests and `--peer-stdio` swap it so they never touch the real one.
-    var apply: (Clip) -> Void = { c in DispatchQueue.main.async { if Board.write(c) { Capture.ignoreChange(NSPasteboard.general.changeCount) } } }
+    var apply: (Clip) -> Void = Platform.apply
     /// Main thread: an item arrived (for the bubble), or a link's state changed (for Settings).
     var onReceived: () -> Void = {}
     var onStatus: () -> Void = {}
     /// Main thread: files moving right now, about four times a second while any are.
     var onTransfers: ([String: Transfer]) -> Void = { _ in }
+    /// Main thread: a device put one of this machine's items on its clipboard, with that device's name.
+    var onApplied: (String, String) -> Void = { _, _ in }
 
     private lazy var db = DB()
     private var sessions: [Session] = []
     private var links: [String: HostLink] = [:]
-    private var server: PeerServer?
+    private var server: AnyObject?
     private var pathMonitor: NWPathMonitor?
     private var hooked = false
     /// When each outgoing item was sent, to log copy-to-applied latency.
@@ -40,18 +42,18 @@ final class SyncEngine {
             try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
             try? device.write(to: idFile, atomically: true, encoding: .utf8)
         }
-        name = ProcessInfo.processInfo.environment["CLIPBUBBLE_DEVICE_NAME"] ?? Host.current().localizedName ?? "Mac"
+        name = ProcessInfo.processInfo.environment["CLIPBUBBLE_DEVICE_NAME"] ?? Platform.deviceName
     }
 
     // MARK: Hosts
 
-    static var enabledHosts: [String] { UserDefaults.standard.stringArray(forKey: "sync.hosts") ?? [] }
-    static var paused: Bool { UserDefaults.standard.bool(forKey: "sync.paused") }
+    static var enabledHosts: [String] { Platform.defaults.stringArray(forKey: "sync.hosts") ?? [] }
+    static var paused: Bool { Platform.defaults.bool(forKey: "sync.paused") }
 
     /// Called at launch: listens for peers (no CPU while idle) and dials the hosts switched on.
     func start() {
         queue.async { [self] in
-            if server == nil { server = PeerServer(engine: self) }
+            if server == nil { server = Platform.listen(self) }
             reconcileLinks()
         }
     }
@@ -59,7 +61,7 @@ final class SyncEngine {
     func setHost(_ alias: String, on: Bool) {
         var hosts = Self.enabledHosts.filter { $0 != alias }
         if on { hosts.append(alias) }
-        UserDefaults.standard.set(hosts, forKey: "sync.hosts")
+        Platform.defaults.set(hosts, forKey: "sync.hosts")
         queue.async { self.reconcileLinks() }
     }
 
@@ -126,7 +128,7 @@ final class SyncEngine {
     }
 
     func setPaused(_ paused: Bool) {
-        UserDefaults.standard.set(paused, forKey: "sync.paused")
+        Platform.defaults.set(paused, forKey: "sync.paused")
         queue.async { [self] in
             if paused { sessions.forEach { $0.close() } }
             reconcileLinks()
@@ -171,9 +173,7 @@ final class SyncEngine {
         }
         m.start(queue: queue)
         pathMonitor = m
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in
-            self?.queue.async { self?.links.values.forEach { $0.redial() } }
-        }
+        Platform.onWake { [weak self] in self?.queue.async { self?.links.values.forEach { $0.redial() } } }
     }
 
     // MARK: Sessions
@@ -183,7 +183,7 @@ final class SyncEngine {
         if Self.paused && s.link == nil { s.close(); return }
         sessions.append(s)
         hookChanges()
-        s.start(hello: Hello(proto: Sync.proto, device: device, name: name, os: "macos", version: version,
+        s.start(hello: Hello(proto: Sync.proto, device: device, name: name, os: Platform.os, version: version,
                              clock: Date().timeIntervalSince1970), summary: db.stamps(includingWaiting: false))
     }
 
@@ -257,14 +257,17 @@ final class SyncEngine {
         switch f {
         case .hello(let h):
             guard h.proto == Sync.proto else {
-                SyncLog.write("\(h.name) speaks protocol \(h.proto), this Mac \(Sync.proto)")
+                SyncLog.write("\(h.name) speaks protocol \(h.proto), this device \(Sync.proto)")
                 s.link?.versionMismatch(h)
                 s.close()
                 return
             }
-            guard h.device != device, !sessions.contains(where: { $0 !== s && $0.peer?.device == h.device }) else {
-                s.close()
-                return
+            guard h.device != device else { s.close(); return }
+            if let old = sessions.first(where: { $0 !== s && $0.peer?.device == h.device }) {
+                // A device dialling in again has given up on its old link (an iPhone that slept): the new one replaces it.
+                // Otherwise the two ends dialled each other, and the first link stays.
+                guard old.link == nil, s.link == nil else { s.close(); return }
+                old.close()
             }
             s.peer = h
             s.offset = h.clock - Date().timeIntervalSince1970
@@ -303,6 +306,8 @@ final class SyncEngine {
             s.cancelUpload(hash)
             s.cancelDownload(hash)
         case .applied(let hash):
+            let peer = s.peer?.name ?? "peer"
+            DispatchQueue.main.async { self.onApplied(hash, peer) }
             if let t = sentAt.removeValue(forKey: hash) {
                 SyncLog.write("applied on \(s.peer?.name ?? "peer") in \(Int((Date().timeIntervalSince1970 - t) * 1000)) ms")
             }
@@ -405,11 +410,18 @@ enum LinkState: Equatable {
     var ok: Bool { if case .live = self { true } else { false } }
 }
 
-/// One host from ~/.ssh/config: runs ssh, retries with backoff, and turns ssh's errors into a status.
+/// A relay running on a host over SSH: frames in on `input`, frames out on `output`.
+protocol Tunnel: AnyObject {
+    var input: FileHandle { get }
+    var output: FileHandle { get }
+    func close()
+}
+
+/// One host: runs `--peer` there over SSH, retries with backoff, and turns SSH's errors into a status.
 final class HostLink {
     let alias: String
     private unowned let engine: SyncEngine
-    private var process: Process?
+    private var tunnel: Tunnel?
     private var session: Session?
     private var stderr = ""
     private var backoff: Double = 1
@@ -419,8 +431,8 @@ final class HostLink {
     private(set) var state: LinkState = .connecting
 
     private var windows: Bool {
-        get { UserDefaults.standard.string(forKey: "sync.os." + alias) == "windows" }
-        set { UserDefaults.standard.set(newValue ? "windows" : "posix", forKey: "sync.os." + alias) }
+        get { Platform.defaults.string(forKey: "sync.os." + alias) == "windows" }
+        set { Platform.defaults.set(newValue ? "windows" : "posix", forKey: "sync.os." + alias) }
     }
 
     init(alias: String, engine: SyncEngine) {
@@ -436,27 +448,18 @@ final class HostLink {
     }
 
     func connect() {
-        guard !stopped, process == nil, !alias.hasPrefix("-") else { return }
+        guard !stopped, tunnel == nil, !alias.hasPrefix("-") else { return }
         retry?.cancel()
         set(.connecting)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        p.arguments = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
-                       "-o", "ServerAliveCountMax=2", "--", alias, remoteCommand]
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe
-        p.standardOutput = outPipe
-        p.standardError = errPipe
         stderr = ""
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty else { h.readabilityHandler = nil; return }
-            self?.engine.queue.async { if (self?.stderr.count ?? 0) < 8192 { self?.stderr += String(decoding: d, as: UTF8.self) } }
-        }
-        p.terminationHandler = { [weak self] _ in self?.engine.queue.async { self?.exited() } }
-        do { try p.run() } catch { set(.offline(Date().addingTimeInterval(backoff))); scheduleRetry(); return }
-        process = p
-        let s = Session(input: outPipe.fileHandleForReading, output: inPipe.fileHandleForWriting, engine: engine)
+        let t: Tunnel
+        do {
+            t = try Platform.dial(alias, remoteCommand,
+                stderr: { [weak self] d in self?.engine.queue.async { if (self?.stderr.count ?? 0) < 8192 { self?.stderr += String(decoding: d, as: UTF8.self) } } },
+                exited: { [weak self] in self?.engine.queue.async { self?.exited() } })
+        } catch { set(.offline(Date().addingTimeInterval(backoff))); scheduleRetry(); return }
+        tunnel = t
+        let s = Session(input: t.input, output: t.output, engine: engine)
         s.link = self
         session = s
         engine.begin(s)
@@ -473,12 +476,12 @@ final class HostLink {
     func sessionEnded(_ s: Session) {
         guard session === s else { return }
         session = nil
-        process?.terminate()
+        tunnel?.close()
     }
 
     private func exited() {
         let wasLive = state.ok
-        process = nil
+        tunnel = nil
         if let s = session { session = nil; s.close() }
         guard !stopped else { return }
         let err = stderr
@@ -512,7 +515,7 @@ final class HostLink {
     func redialIfDown() { if case .offline = state { redial() } }
 
     func redial() {
-        guard !stopped, process == nil else { return }
+        guard !stopped, tunnel == nil else { return }
         backoff = 1
         connect()
     }
@@ -521,7 +524,7 @@ final class HostLink {
         stopped = true
         retry?.cancel()
         session?.close()
-        process?.terminate()
+        tunnel?.close()
     }
 
     private func set(_ s: LinkState) {
@@ -847,8 +850,7 @@ struct Transfer: Equatable {
 /// Where files from another device land.
 func receivedFolder(_ device: String) -> URL {
     let downloads = ProcessInfo.processInfo.environment["CLIPBUBBLE_DOWNLOADS"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        ?? Platform.downloads
     return downloads.appendingPathComponent("ClipBubble").appendingPathComponent(safeFileName(device))
 }
 
@@ -876,149 +878,7 @@ extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }
 
-// MARK: - Local endpoint
-
-/// Where `--peer` finds the running app. Short enough for a Unix socket path.
-var peerSocketPath: String {
-    let p = Paths.dir.appendingPathComponent("peer.sock").path
-    return p.utf8.count < 100 ? p : "/tmp/clipbubble-\(getuid()).sock"
-}
-
-/// The app's Unix socket. Each connection is a peer that came in over SSH through `--peer`.
-final class PeerServer {
-    private var source: DispatchSourceRead?
-
-    init?(engine: SyncEngine) {
-        let path = peerSocketPath
-        unlink(path)
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0, bindUnix(fd, path), listen(fd, 8) == 0 else { if fd >= 0 { close(fd) }; return nil }
-        chmod(path, 0o600)
-        let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: engine.queue)
-        src.setEventHandler {
-            let c = accept(fd, nil, nil)
-            guard c >= 0 else { return }
-            var on: Int32 = 1
-            setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-            let h = FileHandle(fileDescriptor: c, closeOnDealloc: true)
-            engine.begin(Session(input: h, output: h, engine: engine))
-        }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        source = src
-    }
-}
-
-private func bindUnix(_ fd: Int32, _ path: String) -> Bool {
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    let bytes = Array(path.utf8)
-    guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
-    withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-        for (i, b) in bytes.enumerated() { buf[i] = b }
-        buf[bytes.count] = 0
-    }
-    return withUnsafePointer(to: &addr) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } == 0
-    }
-}
-
-private func connectUnix(_ path: String) -> Int32 {
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    let bytes = Array(path.utf8)
-    guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return -1 }
-    withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-        for (i, b) in bytes.enumerated() { buf[i] = b }
-        buf[bytes.count] = 0
-    }
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { return -1 }
-    let ok = withUnsafePointer(to: &addr) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } == 0
-    }
-    if !ok { close(fd); return -1 }
-    var on: Int32 = 1
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-    return fd
-}
-
-/// `ClipBubble --peer`, run by ssh on this Mac: pipes ssh's stdio to the running app, starting it if needed.
-enum PeerRelay {
-    static func run() -> Never {
-        signal(SIGPIPE, SIG_IGN)
-        var fd = connectUnix(peerSocketPath)
-        if fd < 0 {
-            let open = Process()
-            open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            open.arguments = ["-gj", Bundle.main.bundlePath]
-            try? open.run()
-            for _ in 0..<40 where fd < 0 {
-                usleep(250_000)
-                fd = connectUnix(peerSocketPath)
-            }
-        }
-        guard fd >= 0 else {
-            FileHandle.standardError.write(Data("CLIPBUBBLE_NOT_RUNNING\n".utf8))
-            exit(3)
-        }
-        Thread.detachNewThread { pipeBytes(from: 0, to: fd); shutdown(fd, SHUT_WR) }
-        pipeBytes(from: fd, to: 1)
-        exit(0)
-    }
-
-    private static func pipeBytes(from src: Int32, to dst: Int32) {
-        var buf = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let n = read(src, &buf, buf.count)
-            if n <= 0 { return }
-            var off = 0
-            while off < n {
-                let w = buf[off..<n].withUnsafeBytes { write(dst, $0.baseAddress, n - off) }
-                if w <= 0 { return }
-                off += w
-            }
-        }
-    }
-}
-
-// MARK: - SSH config and log
-
-enum SSHConfig {
-    /// Host aliases from ~/.ssh/config and the files it includes, skipping patterns.
-    static func hosts() -> [String] {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-        var seen: [String] = []
-        var visited: Set<String> = []
-        func read(_ path: String) {
-            guard visited.insert(path).inserted, let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
-            for line in text.split(whereSeparator: \.isNewline) {
-                let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "=" }).map(String.init)
-                guard let key = parts.first?.lowercased() else { continue }
-                if key == "host" {
-                    for h in parts.dropFirst() where !h.contains("*") && !h.contains("?") && !h.hasPrefix("!") && !seen.contains(h) {
-                        seen.append(h)
-                    }
-                } else if key == "include" {
-                    for pattern in parts.dropFirst() {
-                        let p = (pattern as NSString).expandingTildeInPath
-                        let full = p.hasPrefix("/") ? p : dir.appendingPathComponent(p).path
-                        for f in glob(full) { read(f) }
-                    }
-                }
-            }
-        }
-        read(dir.appendingPathComponent("config").path)
-        return seen
-    }
-
-    private static func glob(_ pattern: String) -> [String] {
-        var g = glob_t()
-        defer { globfree(&g) }
-        guard Darwin.glob(pattern, 0, nil, &g) == 0 else { return [] }
-        return (0..<Int(g.gl_pathc)).compactMap { g.gl_pathv[$0].map { String(cString: $0) } }
-    }
-}
+// MARK: - Log
 
 enum SyncLog {
     private static let queue = DispatchQueue(label: "clipbubble.synclog", qos: .background)

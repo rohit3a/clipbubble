@@ -167,5 +167,27 @@ func linkTests() {
     check(lines.contains { $0.hasPrefix("clip|t:\(sha("mac-old"))|") && !$0.hasSuffix("||false|false") }, "the peer got this Mac's history")
     check(lines.contains("deleted|\(liveHash)") && !lines.contains { $0.hasPrefix("clip|\(liveHash)|") }, "the delete reached the peer")
     check(lines.contains { $0.hasPrefix("clip|i:\(sha(png))|") && $0.hasSuffix("|false|true") }, "the image is stored on the peer")
+
+    // The same device dialling in again replaces its old link instead of being turned away.
+    func dialIn() -> (Process, Pipe) {
+        let p = Process(), toChild = Pipe(), fromChild = Pipe()
+        p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        p.environment = childEnv(peerHome, ["CLIPBUBBLE_CHILD": "serve"])
+        p.standardInput = toChild
+        p.standardOutput = fromChild
+        try? p.run()
+        engine.queue.sync { engine.begin(Session(input: fromChild.fileHandleForReading, output: toChild.fileHandleForWriting, engine: engine)) }
+        return (p, toChild)
+    }
+    let (first, _) = dialIn()
+    check(waitFor("first link") { engine.linked.count == 1 }, "the device links")
+    let (second, secondIn) = dialIn()
+    check(waitFor("old link closes") { !first.isRunning }, "dialling in again closes its old link")
+    let again = "after redial \(Date().timeIntervalSince1970)"
+    db.upsert(kind: "text", text: again, file: nil, source: "Notes", hash: "t:" + sha(again))
+    check(waitFor("new link applies") { (try? String(contentsOf: appliedFile, encoding: .utf8))?.contains("t:" + sha(again)) ?? false },
+          "and the new link carries copies")
+    try? secondIn.fileHandleForWriting.close()
+    second.waitUntilExit()
     DB.changed = hook
 }

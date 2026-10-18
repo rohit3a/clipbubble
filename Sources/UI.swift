@@ -854,6 +854,7 @@ struct SyncSettings: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Copy on one machine, paste on another. Works with ClipBubble on your other Macs, Linux and Windows machines, using your SSH config and keys.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.bottom, 6)
+            PhonePairing()
             if hosts.isEmpty {
                 Text("No hosts in ~/.ssh/config yet. Add one there and it shows up here.")
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
@@ -925,6 +926,52 @@ struct SyncSettings: View {
             if case .otherOS = r { NSWorkspace.shared.open(RemoteSetup.releases) }
             SyncEngine.shared.redial(host)
         })
+    }
+}
+
+/// Settings → Sync over SSH → iPhone: shows a QR code for the ClipBubble iPhone app to scan.
+struct PhonePairing: View {
+    @State private var server: PairingServer?
+    @State private var qr: NSImage?
+    @State private var note: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: "iphone").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("iPhone").font(.system(size: 13, weight: .medium))
+                    if let note { Text(note).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                }
+                Spacer(minLength: 8)
+                Button(server == nil ? "Link iPhone…" : "Done") { server == nil ? start() : stop() }.controlSize(.small)
+            }
+            if let qr {
+                Image(nsImage: qr).interpolation(.none).resizable().frame(width: 150, height: 150)
+                    .padding(8).background(Color.white, in: RoundedRectangle(cornerRadius: 8)).padding(.leading, 30)
+            }
+        }
+        .padding(.vertical, 5)
+        .onDisappear(perform: stop)
+    }
+
+    private func start() {
+        guard PairingServer.remoteLoginOn() else {
+            note = "Turn on Remote Login first, in System Settings → General → Sharing."
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Sharing-Settings.extension")!)
+            return
+        }
+        let s = PairingServer()
+        s.onReady = { qr = PairingServer.qr($0); note = "Scan with the iPhone's Camera, or in ClipBubble on the iPhone. Same Wi-Fi as this Mac." }
+        s.onPaired = { name in qr = nil; server = nil; note = "Linked \(name). It syncs whenever ClipBubble is open there." }
+        server = s
+        s.start()
+    }
+
+    private func stop() {
+        server?.stop()
+        server = nil
+        qr = nil
     }
 }
 
@@ -1061,6 +1108,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.hoverChanged = { [weak self] in self?.updatePeek() }
 
         capture = Capture { [weak self] in DispatchQueue.main.async { self?.captured() } }
+        // Before the folder watchers: a pending privacy prompt for a folder mustn't keep linked devices waiting.
+        let sync = SyncEngine.shared
+        sync.onReceived = { [weak self] in self?.captured() }
+        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
+        sync.onTransfers = { [weak self] t in
+            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
+            self?.model.transfers = t
+            if finished { self?.captured() }
+        }
+        sync.start()
         syncScreenshots()
         syncDownloads()
         model.prefsChanged = { [weak self] in self?.syncScreenshots(); self?.syncDownloads(); self?.importFolders() }
@@ -1085,15 +1142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in self?.handleKey(e) ?? e }
         registerHotKey()
-        let sync = SyncEngine.shared
-        sync.onReceived = { [weak self] in self?.captured() }
-        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
-        sync.onTransfers = { [weak self] t in
-            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
-            self?.model.transfers = t
-            if finished { self?.captured() }
-        }
-        sync.start()
     }
 
     /// Every screenshot lands in history; copying it to the clipboard as well is optional.
