@@ -9,6 +9,14 @@ if CommandLine.arguments.contains("--peer-stdio") {
     SyncEngine.shared.serveStdio()
     dispatchMain()
 }
+if CommandLine.arguments.contains("--pair") {
+    // The same pairing as Settings, from a terminal: prints the link the QR code would hold.
+    let p = PairingServer()
+    p.onReady = { print($0.absoluteString); fflush(stdout) }
+    p.onPaired = { print("Linked \($0)"); exit(0) }
+    p.start()
+    dispatchMain()
+}
 if CommandLine.arguments.contains("--mcp") {
     MCP.run()
     exit(0)
