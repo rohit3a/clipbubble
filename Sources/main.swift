@@ -3,6 +3,12 @@ import AppKit
 // A linked device can vanish mid-write; that should end its link, not the app.
 signal(SIGPIPE, SIG_IGN)
 
+// A typo'd or newer option shouldn't open a second bubble next to the running one.
+let options = ["--peer", "--peer-stdio", "--pair", "--update", "--mcp"]
+if let unknown = CommandLine.arguments.dropFirst().first(where: { $0.hasPrefix("--") && !options.contains($0) }) {
+    print("ClipBubble: unknown option \(unknown). Options: \(options.joined(separator: ", "))")
+    exit(2)
+}
 if CommandLine.arguments.contains("--peer") { PeerRelay.run() }
 if CommandLine.arguments.contains("--peer-stdio") {
     SyncEngine.shared.apply = { c in SyncLog.write("would apply \(c.hash)") }
@@ -17,6 +23,7 @@ if CommandLine.arguments.contains("--pair") {
     p.start()
     dispatchMain()
 }
+if CommandLine.arguments.contains("--update") { Updater.runFromTerminal() }
 if CommandLine.arguments.contains("--mcp") {
     MCP.run()
     exit(0)

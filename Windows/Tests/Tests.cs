@@ -58,6 +58,24 @@ static class Program
 
     static IEnumerable<(string, Action)> All() => new (string, Action)[]
     {
+        ("updates compare versions as numbers", () =>
+        {
+            Check(Updater.IsNewer("1.10.0", "1.9.2"), "1.10.0 is newer than 1.9.2");
+            Check(Updater.IsNewer("1.6.1", "1.6.0"), "1.6.1 is newer than 1.6.0");
+            Check(!Updater.IsNewer("1.6.0", "1.6.0"), "the same version isn't an update");
+            Check(!Updater.IsNewer("1.5.0", "1.6.0"), "an older release isn't an update");
+        }),
+        ("an update is the release's exe", () =>
+        {
+            var r = Updater.Parse(@"{""tag_name"": ""v1.7.0"", ""html_url"": ""https://github.com/rohit3a/clipbubble/releases/tag/v1.7.0"",
+                ""assets"": [{""name"": ""ClipBubble-Windows.zip"", ""browser_download_url"": ""https://example.com/z""},
+                             {""name"": ""ClipBubble.exe"", ""browser_download_url"": ""https://example.com/ClipBubble.exe""}]}");
+            Check(r.Version == "1.7.0", "the tag's v is dropped");
+            Check(r.Exe.EndsWith("/ClipBubble.exe"), "the exe, not the zip");
+            var macOnly = @"{""tag_name"": ""v1.7.0"", ""html_url"": ""https://x"", ""assets"": [{""name"": ""ClipBubble.zip"", ""browser_download_url"": ""https://x/z""}]}";
+            try { Updater.Parse(macOnly); Check(false, "a release without the exe isn't offered"); }
+            catch (InvalidOperationException) { }
+        }),
         ("schema matches the Mac app", () =>
         {
             using (new Db()) { }

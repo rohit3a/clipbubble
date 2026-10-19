@@ -30,7 +30,7 @@
 - **Paste without hunting.** Press <kbd>⌃⌥V</kbd> anywhere, type to search, and press <kbd>↩</kbd>: it pastes straight into the app you were in. Or drag any item out into Slack, Figma or a browser upload.
 - **Hover to peek** at your last three copies; one click pastes.
 - **Built-in MCP server.** Claude Code, Codex, Cursor and Claude Desktop can read your clipboard history (and actually see the images), put things on your clipboard, and design new mascots for you.
-- **Private and tiny.** Native Swift with zero dependencies. Everything lives in a local SQLite file, and nothing leaves your Mac. It skips password-manager copies and deletes everything after 7 days. It uses about 30 MB of RAM and 0% CPU at idle.
+- **Private and tiny.** Native Swift with zero dependencies. Everything lives in a local SQLite file, and nothing leaves your Mac apart from an update check with GitHub, which you can turn off. It skips password-manager copies and deletes everything after 7 days. It uses about 30 MB of RAM and 0% CPU at idle.
 
 ## Install
 
@@ -48,6 +48,8 @@ git clone https://github.com/rohit3a/clipbubble && cd clipbubble && ./build.sh
 
 `build.sh` compiles the app, installs it to `~/Applications` and launches it. Requires macOS 14 or later.
 
+**Updates:** ClipBubble checks GitHub for a new version every few hours. When there is one, a dot appears on ⚙, and **Settings → General → Update** installs it and reopens the app. `ClipBubble --update` does the same from a terminal.
+
 **Permissions:** Settings (⚙ in the panel) → **Folders & permissions** shows each one live, with a switch and a **Fix** button that opens the right page in System Settings:
 - **Screenshots:** ClipBubble watches the folder from your macOS screenshot setting (⌘⇧5 → Options → Save to), and notices when you change it. You can also pick a different folder.
 - **Recent downloads:** your Downloads folder.
@@ -57,7 +59,7 @@ git clone https://github.com/rohit3a/clipbubble && cd clipbubble && ./build.sh
 
 The Windows version lives in [`Windows/`](Windows). It's a separate C# app with the same panel, mascots, history database and MCP tools. It needs Windows 10 22H2 or Windows 11 and nothing else. It runs on the .NET Framework that ships with Windows, as one 220 KB `ClipBubble.exe`.
 
-**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it anywhere and run it. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**.
+**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it anywhere and run it. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**. After that it updates itself from **Settings → General → Update**.
 
 **Or build from source** (needs the [.NET SDK](https://dotnet.microsoft.com/download)):
 
