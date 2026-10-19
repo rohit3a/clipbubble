@@ -488,6 +488,7 @@ struct Tile: View {
 
 struct PanelView: View {
     @ObservedObject var model: Model
+    @ObservedObject private var updater = Updater.shared
     @FocusState private var searchFocused: Bool
     @State private var lift: CGFloat = 0
 
@@ -574,12 +575,17 @@ struct PanelView: View {
         }
     }
 
+    private var updateAvailable: Bool { if case .available = updater.state { return true } else { return false } }
+
     private var footer: some View {
         HStack(spacing: 14) {
             Button { model.showSettings = true } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 12)).foregroundStyle(.secondary)
+                    .overlay(alignment: .topTrailing) {
+                        if case .available = updater.state { Circle().fill(Color.accentColor).frame(width: 6, height: 6).offset(x: 3, y: -2) }
+                    }
             }
-            .buttonStyle(.plain).help("Settings")
+            .buttonStyle(.plain).help(updateAvailable ? "Settings: an update is available" : "Settings")
             Spacer()
             Key(keys: "↩", label: "Paste")
             Key(keys: "⌥↩", label: "Copy")
@@ -694,15 +700,7 @@ struct SettingsView: View {
                         Text("Paste it into your agent and it connects itself.")
                             .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.top, 4)
                     }
-                    section("General") {
-                        toggleRow("power", "Open at login", nil, isOn: $openAtLogin)
-                        HStack {
-                            Button("Clear all history…", action: clearAll)
-                            Spacer()
-                            Button("Quit ClipBubble") { NSApp.terminate(nil) }
-                        }
-                        .controlSize(.small).padding(.top, 6)
-                    }
+                    general
                 }
                 .padding(16)
             }
@@ -721,6 +719,19 @@ struct SettingsView: View {
         .onChange(of: copyShots) { _, on in UserDefaults.standard.set(on, forKey: "copyScreenshots") }
         .onChange(of: openAtLogin) { _, on in
             try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
+        }
+    }
+
+    private var general: some View {
+        section("General") {
+            UpdateRow(updater: Updater.shared)
+            toggleRow("power", "Open at login", nil, isOn: $openAtLogin)
+            HStack {
+                Button("Clear all history…", action: clearAll)
+                Spacer()
+                Button("Quit ClipBubble") { NSApp.terminate(nil) }
+            }
+            .controlSize(.small).padding(.top, 6)
         }
     }
 
@@ -1118,6 +1129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if finished { self?.captured() }
         }
         sync.start()
+        Updater.shared.start()
         syncScreenshots()
         syncDownloads()
         model.prefsChanged = { [weak self] in self?.syncScreenshots(); self?.syncDownloads(); self?.importFolders() }

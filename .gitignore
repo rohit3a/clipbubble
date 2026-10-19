@@ -9,3 +9,4 @@ iOS/**/Info.plist
 iOS/Info.plist
 iOS/*.entitlements
 iOS/build/
+dist/

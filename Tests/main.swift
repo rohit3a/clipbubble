@@ -27,6 +27,7 @@ if child { runChild() }
 syncTests()
 storeTests()
 linkTests()
+updaterTests()
 
 try? FileManager.default.removeItem(at: testHome)
 print("\(ran) checks, \(failures) failed")

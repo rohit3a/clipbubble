@@ -21,6 +21,7 @@ namespace ClipBubble
                 Mcp.Run();
                 return 0;
             }
+            if (args.Contains("--after")) Updater.AfterUpdate(args);
             using var single = new Mutex(true, Named("app"), out var first);
             if (!first)
             {

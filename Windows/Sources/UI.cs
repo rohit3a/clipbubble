@@ -1409,7 +1409,15 @@ sealed class PanelView : Grid
     FrameworkElement Footer()
     {
         var footer = new Grid { Margin = new Thickness(14, 0, 14, 0) };
-        var gear = new Border { Child = UI.Icon(UI.Gear, 14, UI.Secondary), Background = Brushes.Transparent, HorizontalAlignment = HorizontalAlignment.Left, ToolTip = "Settings" };
+        var icon = new Grid();
+        icon.Children.Add(UI.Icon(UI.Gear, 14, UI.Secondary));
+        // A dot when an update is waiting in Settings.
+        var dot = new Ellipse { Width = 6, Height = 6, Fill = UI.AccentBrush, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, -2, -3, 0) };
+        icon.Children.Add(dot);
+        var gear = new Border { Child = icon, Background = Brushes.Transparent, HorizontalAlignment = HorizontalAlignment.Left, ToolTip = "Settings" };
+        void ShowDot() => dot.Visibility = Updater.Shared.Now is Updater.Available ? Visibility.Visible : Visibility.Collapsed;
+        ShowDot();
+        Updater.Shared.Changed += ShowDot;
         gear.MouseLeftButtonUp += (_, _) => model.ShowSettings = true;
         footer.Children.Add(gear);
         var keys = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
@@ -1557,8 +1565,9 @@ sealed class SettingsView : Grid
         // (and so interrupting) the controls when nothing changed.
         ticker.Tick += (_, _) => { if (Folders() != shown) Render(); };
         Action<Change> changed = what => { if (what is Change.Prefs or Change.Mascot or Change.Sync) Render(); };
-        Loaded += (_, _) => { ticker.Start(); model.Changed += changed; Keyboard.Focus(this); };
-        Unloaded += (_, _) => { ticker.Stop(); model.Changed -= changed; };
+        Action updated = Render;
+        Loaded += (_, _) => { ticker.Start(); model.Changed += changed; Updater.Shared.Changed += updated; Keyboard.Focus(this); };
+        Unloaded += (_, _) => { ticker.Stop(); model.Changed -= changed; Updater.Shared.Changed -= updated; };
     }
 
     (string Shots, bool ShotsOk, string? Downloads, bool DownloadsOk) shown;
@@ -1642,6 +1651,7 @@ sealed class SettingsView : Grid
         agents.Children.Add(Note("Paste it into your agent and it connects itself.", top: 4));
 
         var general = Section("General");
+        general.Children.Add(UpdateRow());
         general.Children.Add(Row(UI.Power, "Open at login", null, Switch(App.OpenAtLogin, on => Save(() => App.OpenAtLogin = on))));
         var buttons = new Grid { Margin = new Thickness(0, 6, 0, 0) };
         buttons.Children.Add(Button("Clear all history…", null, ClearAll));
@@ -1649,6 +1659,36 @@ sealed class SettingsView : Grid
         quit.HorizontalAlignment = HorizontalAlignment.Right;
         buttons.Children.Add(quit);
         general.Children.Add(buttons);
+    }
+
+    /// The version, whether there's a newer one, and the button that installs it.
+    FrameworkElement UpdateRow()
+    {
+        var updater = Updater.Shared;
+        var (detail, trailing) = updater.Now switch
+        {
+            Updater.Checking => ("Checking…", (FrameworkElement?)null),
+            Updater.Current => ("Up to date.", Button("Check now", null, () => updater.Check())),
+            Updater.Available a => ($"Version {a.Release.Version} is available.", Button("Update", UI.Download, () => updater.Install(a.Release))),
+            Updater.Installing i => (i.Step, null),
+            Updater.Failed f => (f.Why, Button("Try again", null, () => updater.Check())),
+            _ => ("Checks GitHub for a new version every few hours.", Button("Check now", null, () => updater.Check())),
+        };
+        var box = new StackPanel();
+        box.Children.Add(Row(UI.Download, "ClipBubble " + Engine.Version, detail, trailing ?? new Border()));
+        var links = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(30, 0, 0, 0) };
+        if (updater.Now is Updater.Available av) links.Children.Add(Link("What's new", () => Open(av.Release.Page)));
+        if (updater.Now is Updater.Failed) links.Children.Add(Link("Open the releases page", () => Open(Updater.Releases)));
+        if (links.Children.Count > 0) box.Children.Add(links);
+        var auto = Check("Check for updates automatically", Updater.Automatic, on => Save(() => Updater.Automatic = on));
+        auto.Margin = new Thickness(30, 2, 0, 0);
+        box.Children.Add(auto);
+        return box;
+    }
+
+    static void Open(string url)
+    {
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch (Win32Exception) { }
     }
 
     /// Hosts from ~/.ssh/config, each with a switch and how its link is doing.
@@ -2012,6 +2052,7 @@ sealed class App : Application
         sync.Transfers = t => Dispatcher.BeginInvoke(new Action(() => model.SetTransfers(t)));
         Microsoft.Win32.SystemEvents.PowerModeChanged += (_, x) => { if (x.Mode == Microsoft.Win32.PowerModes.Resume) sync.Redial(); };
         sync.Start();
+        Updater.Shared.Start();
     }
 
     /// A fresh copy from another machine goes on this clipboard. Capture then sees it as ours and leaves history alone.
