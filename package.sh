@@ -20,5 +20,5 @@ if [[ -n $ID ]]; then
   echo "Signed with $ID"
 else
   codesign --force -s - $APP
-  echo "Signed ad hoc (no Developer ID in the keychain)"
+  echo "Signed ad hoc (no Developer ID in the keychain): macOS will ask for ClipBubble's permissions again for this build"
 fi

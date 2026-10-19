@@ -652,7 +652,7 @@ struct SettingsView: View {
                         }
                         permRow("arrow.down.circle", "Recent downloads", folder: FolderWatcher.downloadsFolder, note: nil,
                                 ok: dlOK, isOn: pref("downloads"), fix: openFilesSettings) { EmptyView() }
-                        permRow("keyboard", "Auto-paste", folder: nil, note: "↩ pastes into the app you were in. Needs Accessibility access.",
+                        permRow("keyboard", "Auto-paste", folder: nil, note: autoPasteNote,
                                 ok: autoPaste ? axOK : nil, isOn: $autoPaste, fix: openAccessibilitySettings) { EmptyView() }
                         Text("macOS doesn't let apps change these themselves. Switching one on asks for access; if it was blocked, Fix opens the right page in System Settings.")
                             .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
@@ -720,6 +720,13 @@ struct SettingsView: View {
         .onChange(of: openAtLogin) { _, on in
             try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
         }
+    }
+
+    /// macOS keeps a grant for each signature: an entry left by an older copy stays switched on but no longer counts.
+    private var autoPasteNote: String {
+        let what = "↩ pastes into the app you were in. Needs Accessibility access."
+        guard autoPaste, axOK == false else { return what }
+        return what + " If ClipBubble is already switched on there, that's an older copy: select it, remove it with −, then switch Auto-paste off and on here."
     }
 
     private var general: some View {

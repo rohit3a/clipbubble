@@ -4,6 +4,11 @@
 # once with: xcrun notarytool store-credentials clipbubble --apple-id <you> --team-id <team>
 set -e
 cd "$(dirname "$0")"
+# macOS ties permissions like Accessibility to the signature: an ad hoc release would make every user grant them again.
+if ! security find-identity -v -p codesigning | grep -q '"Developer ID Application: ' && [[ -z $CLIPBUBBLE_ALLOW_ADHOC ]]; then
+  echo "No Developer ID in the keychain: not building an ad hoc release. Set CLIPBUBBLE_ALLOW_ADHOC=1 for a test build." >&2
+  exit 1
+fi
 OUT=dist
 rm -rf $OUT && mkdir -p $OUT/stage
 CLIPBUBBLE_TIMESTAMP=1 ./package.sh $OUT/stage/ClipBubble.app
