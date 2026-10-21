@@ -169,56 +169,53 @@ final class Model: ObservableObject {
     }
 }
 
+/// The app: Recent, Library and Settings as tabs in the system tab bar, with Add as a tab that opens a panel.
 struct HistoryView: View {
     @EnvironmentObject var model: Model
     @State private var tab = Tab.recent
-    @State private var showSettings = false
     @State private var adding: Adding?
+    /// What the Add panel asked for, opened once the panel has gone.
+    @State private var next: Adding?
     @State private var photos: [PhotosPickerItem] = []
+    @State private var viewing: Clip?
 
-    enum Tab { case recent, library }
-    enum Adding { case text, photos, files }
+    enum Tab { case recent, library, add, settings }
+    enum Adding { case panel, text, photos, files }
 
     var body: some View {
-        NavigationStack {
-            Group {
-                switch tab {
-                case .recent: recent
-                case .library: LibraryView()
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 10) {
-                    if let t = model.toast {
-                        Label(t, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 16).padding(.vertical, 10)
-                            .background(.regularMaterial, in: Capsule())
-                            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                    BottomBar(tab: $tab, settings: { showSettings = true }, add: { adding = $0 }, paste: model.paste)
-                }
-            }
-            .animation(.spring(duration: 0.3), value: model.toast)
-            .sheet(isPresented: $showSettings) { HostsView().environmentObject(model) }
-            .sheet(isPresented: Binding(get: { adding == .text }, set: { if !$0 { adding = nil } })) {
-                TextComposer { model.addText($0) }
-            }
-            .photosPicker(isPresented: Binding(get: { adding == .photos }, set: { if !$0 { adding = nil } }),
-                          selection: $photos, maxSelectionCount: 20, matching: .any(of: [.images, .videos]))
-            .onChange(of: photos) {
-                guard !photos.isEmpty else { return }
-                model.addPhotos(photos)
-                photos = []
-            }
-            .fileImporter(isPresented: Binding(get: { adding == .files }, set: { if !$0 { adding = nil } }),
-                          allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result { model.addFiles(urls) }
-            }
-            .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
-                Button("OK") { model.pairing = nil }
-            } message: { Text(model.pairing ?? "") }
+        // Add isn't a place to go, so choosing it opens the panel and leaves the current tab selected.
+        TabView(selection: Binding(get: { tab }, set: { if $0 == .add { adding = .panel } else { tab = $0 } })) {
+            NavigationStack { recent }
+                .tabItem { Label("Recent", systemImage: "clock") }.tag(Tab.recent)
+            NavigationStack { LibraryView() }
+                .tabItem { Label("Library", systemImage: "square.grid.2x2") }.tag(Tab.library)
+            Color.clear
+                .tabItem { Label("Add", systemImage: "plus.circle") }.tag(Tab.add)
+            SettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape") }.tag(Tab.settings)
         }
+        .minimizesOnScroll()
+        .sensoryFeedback(.selection, trigger: tab)
+        .sheet(isPresented: shows(.panel), onDismiss: { adding = next; next = nil }) {
+            AddPanel(paste: model.paste) { next = $0; adding = nil }
+        }
+        .sheet(isPresented: shows(.text)) { TextComposer { model.addText($0) } }
+        .photosPicker(isPresented: shows(.photos), selection: $photos, maxSelectionCount: 20, matching: .any(of: [.images, .videos]))
+        .onChange(of: photos) {
+            guard !photos.isEmpty else { return }
+            model.addPhotos(photos)
+            photos = []
+        }
+        .fileImporter(isPresented: shows(.files), allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { model.addFiles(urls) }
+        }
+        .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
+            Button("OK") { model.pairing = nil }
+        } message: { Text(model.pairing ?? "") }
+    }
+
+    private func shows(_ a: Adding) -> Binding<Bool> {
+        Binding(get: { adding == a }, set: { if !$0, adding == a { adding = nil } })
     }
 
     private var recent: some View {
@@ -229,7 +226,7 @@ struct HistoryView: View {
                         Image(systemName: "laptopcomputer.and.iphone").font(.title).foregroundStyle(.tint)
                         Text("Copy on your iPhone, paste on your computer, and back.").font(.headline)
                         Text("Link a Mac, Linux or Windows computer running ClipBubble.").font(.subheadline).foregroundStyle(.secondary)
-                        Button("Link a computer") { showSettings = true }.buttonStyle(.borderedProminent).padding(.top, 2)
+                        Button("Link a computer") { tab = .settings }.buttonStyle(.borderedProminent).padding(.top, 2)
                     }
                     .padding(.vertical, 8)
                 }
@@ -240,86 +237,102 @@ struct HistoryView: View {
             }
             Section {
                 ForEach(model.clips, id: \.hash) { c in
-                    ClipRow(clip: c, device: model.devices[c.origin])
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.copy(c) }
+                    Button { model.copy(c) } label: { ClipRow(clip: c, device: model.devices[c.origin]) }
+                        .tint(.primary)
                         .swipeActions { Button("Delete", role: .destructive) { model.delete(c) } }
-                        .contextMenu { ClipMenu(clip: c) }
+                        .clipMenu(c) { viewing = c }
                 }
             } header: {
                 if !model.clips.isEmpty { Text("Recent") }
             }
         }
+        .animation(.snappy, value: model.clips.map(\.hash))
         .overlay {
             if model.clips.isEmpty {
                 ContentUnavailableView(model.query.isEmpty ? "Nothing copied yet" : "No matches",
                                        systemImage: model.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass",
-                                       description: Text(model.query.isEmpty ? "Copy something on a linked computer, or paste it here." : "Try other words."))
+                                       description: Text(model.query.isEmpty ? "Copy something on a linked computer, or tap Add." : "Try other words."))
                     .padding(.top, model.hosts.isEmpty ? 220 : 120)
             }
         }
         .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search history")
         .refreshable { model.redialAll() }
         .navigationTitle("ClipBubble")
+        .navigationDestination(item: $viewing) { ClipDetail(clip: $0) }
+        .toast(model.toast)
     }
 }
 
-/// One glass bar for the whole app: the two screens, then Add, Paste and Settings, all the same size.
-struct BottomBar: View {
-    @Binding var tab: HistoryView.Tab
-    let settings: () -> Void
-    let add: (HistoryView.Adding) -> Void
+/// Add: paste what's on this iPhone's clipboard, type a note, or pick photos or files.
+struct AddPanel: View {
     let paste: ([NSItemProvider]) -> Void
+    let pick: (HistoryView.Adding) -> Void
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        HStack(spacing: 0) {
-            slot("clock", "Recent", selected: tab == .recent) { tab = .recent }
-            slot("square.grid.2x2", "Library", selected: tab == .library) { tab = .library }
-            Menu {
-                Button { add(.text) } label: { Label("Text", systemImage: "text.cursor") }
-                Button { add(.photos) } label: { Label("Photos & Videos", systemImage: "photo.on.rectangle") }
-                Button { add(.files) } label: { Label("Files", systemImage: "folder") }
-            } label: {
-                Image(systemName: "plus").font(.system(size: 20, weight: .semibold))
-                    .frame(width: 44, height: 44).background(Color.primary.opacity(0.1), in: Circle())
-                    .frame(maxWidth: .infinity)
+        VStack(spacing: 18) {
+            Text("Add to ClipBubble").font(.headline)
+            // The system Paste button reads the clipboard without the "Allow Paste" prompt.
+            PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { p in
+                paste(p)
+                Task { @MainActor in dismiss() }
             }
-            .accessibilityLabel("Add")
-            // The system Paste button reads the clipboard without the "Allow Paste" prompt. Its look is the system's,
-            // so it's a circle the size of Add's.
-            PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { paste($0) }
-                .labelStyle(.iconOnly).buttonBorderShape(.circle).controlSize(.large)
-                .frame(maxWidth: .infinity)
-            slot("gearshape", "Settings", selected: false, action: settings)
+            .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.extraLarge)
+            HStack(spacing: 12) {
+                option("Text", "text.cursor", .text)
+                option("Photos", "photo.on.rectangle", .photos)
+                option("Files", "folder", .files)
+            }
         }
-        .foregroundStyle(.primary)
-        .padding(6)
-        .glassCapsule()
-        .padding(.horizontal, 24)
-        .padding(.bottom, 4)
-        .sensoryFeedback(.selection, trigger: tab)
+        .padding(.horizontal, 20)
+        .padding(.top, 24)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .presentationDetents([.height(270)])
+        .presentationCornerRadius(32)
     }
 
-    private func slot(_ symbol: String, _ name: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 19, weight: selected ? .semibold : .regular))
-                .frame(width: 56, height: 44)
-                .background(selected ? Color.primary.opacity(0.12) : .clear, in: Capsule())
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
+    private func option(_ title: String, _ symbol: String, _ a: HistoryView.Adding) -> some View {
+        Button { pick(a) } label: {
+            VStack(spacing: 8) {
+                Image(systemName: symbol).font(.title2)
+                Text(title).font(.subheadline.weight(.medium))
+            }
+            .frame(maxWidth: .infinity, minHeight: 92)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(name)
+        .buttonStyle(Pressable())
     }
 }
 
-private extension View {
-    @ViewBuilder func glassCapsule() -> some View {
-        if #available(iOS 26, *) {
-            glassEffect(.regular.interactive(), in: Capsule())
-        } else {
-            background(.regularMaterial, in: Capsule()).shadow(color: .black.opacity(0.15), radius: 12, y: 4)
+/// Items dip when touched.
+struct Pressable: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.snappy(duration: 0.18), value: configuration.isPressed)
+    }
+}
+
+extension View {
+    /// The short "Copied" line, just above the tab bar.
+    func toast(_ text: String?) -> some View {
+        safeAreaInset(edge: .bottom) {
+            if let text {
+                Label(text, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        .animation(.spring(duration: 0.35), value: text)
+    }
+
+    /// iOS 26 shrinks the tab bar while you scroll down a list.
+    @ViewBuilder func minimizesOnScroll() -> some View {
+        if #available(iOS 26, *) { tabBarMinimizeBehavior(.onScrollDown) } else { self }
     }
 }
 
@@ -389,23 +402,6 @@ struct HostRow: View {
     }
 }
 
-struct ClipMenu: View {
-    @EnvironmentObject var model: Model
-    let clip: Clip
-
-    var body: some View {
-        Button { model.copy(clip) } label: { Label("Copy", systemImage: "doc.on.doc") }
-        if clip.remote {
-            Button { SyncEngine.shared.get(clip.hash) } label: { Label("Get from \(model.devices[clip.origin] ?? "computer")", systemImage: "icloud.and.arrow.down") }
-        } else if clip.kind == "text" {
-            ShareLink(item: clip.text) { Label("Share", systemImage: "square.and.arrow.up") }
-        } else if let p = clip.file ?? clip.paths.first {
-            ShareLink(item: URL(fileURLWithPath: p)) { Label("Share or Save", systemImage: "square.and.arrow.up") }
-        }
-        Button(role: .destructive) { model.delete(clip) } label: { Label("Delete", systemImage: "trash") }
-    }
-}
-
 struct ClipRow: View {
     let clip: Clip
     let device: String?
@@ -438,9 +434,8 @@ struct ClipRow: View {
     private var color: Color { clip.remote ? .teal : clip.look.tint }
 }
 
-struct HostsView: View {
+struct SettingsView: View {
     @EnvironmentObject var model: Model
-    @Environment(\.dismiss) private var dismiss
     @State private var alias = ""
     @State private var scanning = false
     @AppStorage("appearance") private var appearance = Appearance.system
@@ -495,9 +490,8 @@ struct HostsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .toolbar { Button("Done") { dismiss() } }
             .sheet(isPresented: $scanning) {
-                Scanner { url in scanning = false; dismiss(); model.open(url) }.ignoresSafeArea()
+                Scanner { url in scanning = false; model.open(url) }.ignoresSafeArea()
             }
         }
     }

@@ -6,6 +6,15 @@ enum Look: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
+    var name: String {
+        switch self {
+        case .text: return "Text"
+        case .link: return "Link"
+        case .image: return "Image"
+        case .file: return "File"
+        }
+    }
+
     var symbol: String {
         switch self {
         case .text: return "text.alignleft"
@@ -50,6 +59,8 @@ struct LibraryView: View {
     /// The device an item came from; "" is this iPhone, nil is everywhere.
     @State private var from: String?
     @State private var all: [Clip] = []
+    @Namespace private var chips
+    @State private var viewing: Clip?
 
     private var shown: [Clip] { all.filter { (look == nil || $0.look == look) && (from == nil || $0.origin == from) } }
 
@@ -70,9 +81,11 @@ struct LibraryView: View {
                 ForEach(days, id: \.day) { d in
                     Section {
                         ForEach(d.clips, id: \.hash) { c in
-                            LibraryTile(clip: c, device: c.origin.isEmpty ? nil : model.devices[c.origin])
-                                .onTapGesture { model.copy(c) }
-                                .contextMenu { ClipMenu(clip: c) }
+                            Button { model.copy(c) } label: {
+                                LibraryTile(clip: c, device: c.origin.isEmpty ? nil : model.devices[c.origin])
+                            }
+                            .buttonStyle(Pressable())
+                            .clipMenu(c) { viewing = c }
                         }
                     } header: {
                         Text(title(d.day)).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
@@ -84,21 +97,25 @@ struct LibraryView: View {
             }
             .padding(.horizontal)
             .padding(.bottom, 20)
+            .animation(.snappy, value: look)
+            .animation(.snappy, value: from)
         }
         .background(Color(.systemGroupedBackground))
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search everything")
         .navigationTitle("Library")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: query) { all = model.library(query: query) }
-        .onChange(of: model.clips) { all = model.library(query: query) }
+        .onChange(of: model.clips) { withAnimation(.snappy) { all = model.library(query: query) } }
+        .navigationDestination(item: $viewing) { ClipDetail(clip: $0) }
+        .toast(model.toast)
     }
 
     private var filters: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                chip("All", symbol: nil, count: all.count, on: look == nil) { look = nil }
+                chip("All", symbol: nil, count: all.count, on: look == nil) { withAnimation(.snappy) { look = nil } }
                 ForEach(Look.allCases) { l in
-                    chip(l.rawValue, symbol: l.symbol, count: all.filter { $0.look == l }.count, on: look == l) { look = look == l ? nil : l }
+                    chip(l.rawValue, symbol: l.symbol, count: all.filter { $0.look == l }.count, on: look == l) { withAnimation(.snappy) { look = look == l ? nil : l } }
                 }
                 Menu {
                     Picker("From", selection: $from) {
@@ -128,10 +145,14 @@ struct LibraryView: View {
             }
             .font(.subheadline.weight(.medium))
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(on ? Color.accentColor : Color(.secondarySystemGroupedBackground), in: Capsule())
+            .background {
+                // One highlight that slides to the chosen chip.
+                if on { Capsule().fill(Color.accentColor).matchedGeometryEffect(id: "chosen", in: chips) }
+                else { Capsule().fill(Color(.secondarySystemGroupedBackground)) }
+            }
             .foregroundStyle(on ? .white : .primary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Pressable())
     }
 
     private func title(_ day: Date) -> String {
@@ -168,7 +189,7 @@ struct LibraryTile: View {
         } else if clip.look == .file || clip.remote {
             VStack(spacing: 8) {
                 Image(systemName: clip.remote ? "icloud.and.arrow.down" : "doc.fill").font(.largeTitle).foregroundStyle(clip.remote ? .teal : .orange)
-                Text(clip.kind == "image" ? "Image" : clip.paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+                Text(clip.names)
                     .font(.caption).lineLimit(2).multilineTextAlignment(.center)
             }
             .padding(10).frame(maxWidth: .infinity, maxHeight: .infinity)
