@@ -39,6 +39,9 @@ final class KeyboardModel: ObservableObject {
     @Published var note: String?
     private weak var keyboard: UIInputViewController?
     private var started = false
+    private lazy var db = DB()
+    /// A picture fetched from a computer by a tap goes on the clipboard as soon as it arrives.
+    private var fetching: String?
 
     init(keyboard: UIInputViewController) { self.keyboard = keyboard }
 
@@ -60,7 +63,11 @@ final class KeyboardModel: ObservableObject {
     }
 
     func reload() {
-        clips = DB().clips(limit: 40)
+        clips = db.clips(limit: 40)
+        if let h = fetching, let c = clips.first(where: { $0.hash == h && !$0.remote }) {
+            fetching = nil
+            copy(c)
+        }
         let live = SyncEngine.shared.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
         linked = !live.isEmpty
         status = SyncEngine.enabledHosts.isEmpty ? "No computers linked yet"
@@ -71,11 +78,18 @@ final class KeyboardModel: ObservableObject {
         if c.kind == "text" {
             keyboard?.textDocumentProxy.insertText(c.text)
         } else if c.remote {
+            fetching = c.hash
             SyncEngine.shared.get(c.hash)
             flash("Getting it from your computer…")
-        } else if Clipboard.write(c) {
-            flash(c.kind == "image" ? "Image copied. Touch and hold to paste." : "Copied. Touch and hold to paste.")
+        } else {
+            copy(c)
         }
+    }
+
+    /// iOS lets a keyboard type text but not insert pictures or files, so those go on the clipboard to paste.
+    private func copy(_ c: Clip) {
+        guard Clipboard.write(c) else { return }
+        flash(c.imagePath != nil ? "Image copied. Touch and hold the text box, then Paste." : "Copied. Touch and hold the text box, then Paste.")
     }
 
     func type(_ s: String) { keyboard?.textDocumentProxy.insertText(s) }
@@ -154,8 +168,8 @@ struct KeyboardChip: View {
 
     var body: some View {
         Group {
-            if let p = clip.imagePath, !clip.remote, let img = UIImage(contentsOfFile: p)?.preparingThumbnail(of: CGSize(width: 240, height: 120)) {
-                Image(uiImage: img).resizable().scaledToFill().frame(height: 58).clipped()
+            if let p = clip.imagePath, !clip.remote {
+                Thumb(p, pixels: 540).scaledToFill().frame(height: 58).clipped()
             } else {
                 HStack(alignment: .top, spacing: 4) {
                     if clip.kind != "text" { Image(systemName: clip.remote ? "icloud.and.arrow.down" : "doc") }
