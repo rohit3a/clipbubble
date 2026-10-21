@@ -30,6 +30,8 @@ A received item goes on the system clipboard only if it was copied less than 10 
 
 Control frames always go before chunks, so a copy waits behind at most one 256 KB chunk.
 
+Relayed items keep their `origin`, so each side also passes on device names. After a peer's `hello`, a side sends `device` for every device it knows except that peer. When a `hello` or `device` brings a new device or a new name, the side passes that `device` on to its other links, except the one it came from and the device itself. Repeats aren't news, so names settle after one pass. A side ignores `device` for itself and for the peer that sent it, since `hello` already names the peer. Versions before 1.6.2 close the session on type 12, so `device` goes only to peers whose `hello` version is 1.6.2 or later. A version that isn't dot-separated numbers is a development build and counts as current.
+
 ## Frames
 
 Each frame is a 4-byte big-endian length, then that many bytes, a 1-byte type and its fields. A length of 0 or over 4 MiB closes the session. Fields use these encodings.
@@ -55,6 +57,7 @@ Each frame is a 4-byte big-endian length, then that many bytes, a 1-byte type an
 | 9 | ping | `f64` sender clock |
 | 10 | pong | `f64` the ping's clock |
 | 11 | offer | `str` hash: fetch this item now, whatever its size ("Send to") |
+| 12 | device | `str` device, `str` name, `str` os: a device the sender knows, directly or through another link |
 
 `kind` is `text`, `image` or `file`. For text, `text` is the copied text, at most 2 MB. For files it is the file names, one per line, and never local paths. Images carry one blob, the PNG, whose `sha` is the hash without `i:`. File blobs carry an empty `sha`, and their size and SSH's integrity checks cover them. Trailing bytes, unknown types and counts larger than the frame are malformed and close the session.
 

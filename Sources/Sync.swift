@@ -52,6 +52,14 @@ struct Hello: Equatable {
     var os: String
     var version: String
     var clock: Double
+
+    /// Whether the peer reads `device` frames. Earlier versions close the link on a frame type they don't know.
+    /// A build without a release number (a dev or test build) runs this code, so it does.
+    var readsDevices: Bool {
+        let parts = version.split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+        guard !parts.contains(nil) else { return true }
+        return !parts.map { $0! }.lexicographicallyPrecedes([1, 6, 2])
+    }
 }
 
 enum Frame: Equatable {
@@ -69,6 +77,8 @@ enum Frame: Equatable {
     case pong(Double)
     /// "Get this now": the sender wants the receiver to fetch an item, whatever its size.
     case offer(hash: String)
+    /// A device the sender knows, maybe only through another link, so items relayed from it show its name.
+    case device(id: String, name: String, os: String)
 
     var code: UInt8 {
         switch self {
@@ -83,6 +93,7 @@ enum Frame: Equatable {
         case .ping: 9
         case .pong: 10
         case .offer: 11
+        case .device: 12
         }
     }
 
@@ -112,6 +123,8 @@ enum Frame: Equatable {
             w.str(hash)
         case .ping(let t), .pong(let t):
             w.f64(t)
+        case .device(let id, let name, let os):
+            w.str(id); w.str(name); w.str(os)
         }
         var out = Data()
         out.reserveCapacity(w.data.count + 4)
@@ -150,6 +163,7 @@ enum Frame: Equatable {
         case 9: f = .ping(try r.f64())
         case 10: f = .pong(try r.f64())
         case 11: f = .offer(hash: try r.str())
+        case 12: f = .device(id: try r.str(), name: try r.str(), os: try r.str())
         default: throw SyncError.malformed
         }
         guard r.remaining == 0 else { throw SyncError.malformed }

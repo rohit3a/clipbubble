@@ -277,8 +277,24 @@ final class DB {
         else { run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash) }
     }
 
-    func saveDevice(id: String, name: String, os: String) {
-        run("INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os", id, name, os)
+    /// Whether this was news: a device not seen before, or one with a new name.
+    @discardableResult
+    func saveDevice(id: String, name: String, os: String) -> Bool {
+        run("""
+            INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os
+            WHERE name != excluded.name OR os != excluded.os
+            """, id, name, os)
+        return sqlite3_changes(h) > 0
+    }
+
+    func devices() -> [(id: String, name: String, os: String)] {
+        let s = prepare("SELECT id, name, os FROM devices", [])
+        defer { sqlite3_finalize(s) }
+        var out: [(id: String, name: String, os: String)] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(s, 0)), String(cString: sqlite3_column_text(s, 1)), String(cString: sqlite3_column_text(s, 2))))
+        }
+        return out
     }
 
     func deviceNames() -> [String: String] {

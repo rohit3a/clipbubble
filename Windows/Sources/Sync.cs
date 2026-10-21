@@ -27,7 +27,7 @@ sealed record Stamp(string Hash, double Time, bool Deleted)
 
 sealed record Blob(string Name, long Size, string Sha);
 
-enum FrameType : byte { Hello = 1, Summary, Put, Tombstone, Fetch, Chunk, Cancel, Applied, Ping, Pong, Offer }
+enum FrameType : byte { Hello = 1, Summary, Put, Tombstone, Fetch, Chunk, Cancel, Applied, Ping, Pong, Offer, Device }
 
 abstract record Frame
 {
@@ -37,6 +37,25 @@ abstract record Frame
 sealed record Hello(int Proto, string Device, string Name, string Os, string Version, double Clock) : Frame
 {
     public override FrameType Type => FrameType.Hello;
+
+    /// Whether the peer reads device frames. Earlier versions close the link on a frame type they don't know.
+    /// A build without a release number (a dev or test build) runs this code, so it does.
+    public bool ReadsDevices
+    {
+        get
+        {
+            var parts = Version.Split('.');
+            if (!parts.All(p => p.Length > 0 && p.All(char.IsAsciiDigit))) return true;
+            int[] since = [1, 6, 2];
+            for (var i = 0; i < Math.Max(parts.Length, since.Length); i++)
+            {
+                var have = i < parts.Length ? int.Parse(parts[i]) : -1;
+                var want = i < since.Length ? since[i] : -1;
+                if (have != want) return have > want;
+            }
+            return true;
+        }
+    }
 }
 
 sealed record Summary(IReadOnlyList<Stamp> Stamps) : Frame
@@ -70,6 +89,8 @@ sealed record Cancel(string Hash) : Frame { public override FrameType Type => Fr
 sealed record Applied(string Hash) : Frame { public override FrameType Type => FrameType.Applied; }
 /// "Fetch this now, whatever its size": Send to.
 sealed record Offer(string Hash) : Frame { public override FrameType Type => FrameType.Offer; }
+/// A device the sender knows, maybe only through another link, so items relayed from it show its name.
+sealed record DeviceInfo(string Id, string Name, string Os) : Frame { public override FrameType Type => FrameType.Device; }
 sealed record Ping(double At) : Frame { public override FrameType Type => FrameType.Ping; }
 sealed record Pong(double At) : Frame { public override FrameType Type => FrameType.Pong; }
 
@@ -98,6 +119,7 @@ static class Codec
             case Offer o: w.Str(o.Hash); break;
             case Ping p: w.F64(p.At); break;
             case Pong p: w.F64(p.At); break;
+            case DeviceInfo d: w.Str(d.Id); w.Str(d.Name); w.Str(d.Os); break;
         }
         var body = w.ToArray();
         var framed = new byte[4 + body.Length];
@@ -123,6 +145,7 @@ static class Codec
             FrameType.Offer => new Offer(r.Str()),
             FrameType.Ping => new Ping(r.F64()),
             FrameType.Pong => new Pong(r.F64()),
+            FrameType.Device => new DeviceInfo(r.Str(), r.Str(), r.Str()),
             _ => throw new Malformed(),
         };
         if (r.Remaining != 0) throw new Malformed();

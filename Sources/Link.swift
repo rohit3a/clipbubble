@@ -284,7 +284,10 @@ final class SyncEngine {
             s.peer = h
             s.offset = h.clock - Date().timeIntervalSince1970
             if abs(s.offset) > 30 { SyncLog.write("\(h.name)'s clock is \(Int(s.offset)) s off") }
-            db.saveDevice(id: h.device, name: h.name, os: h.os)
+            if db.saveDevice(id: h.device, name: h.name, os: h.os) { share(id: h.device, name: h.name, os: h.os, from: s) }
+            if h.readsDevices {
+                for d in db.devices() where d.id != h.device { s.send(.device(id: d.id, name: d.name, os: d.os)) }
+            }
             s.link?.helloReceived(h)
             SyncLog.write("linked with \(h.name) (\(h.os) \(h.version))")
             publishStatus()
@@ -331,6 +334,19 @@ final class SyncEngine {
             guard let e = s.offered[hash], db.clip(hash: hash)?.remote == true else { return }
             s.download(makeDownload(e, from: s, apply: false))
             watchTransfers()
+        case .device(let id, let name, let os):
+            guard let peer = s.peer else { s.close(); return }
+            guard id != device, id != peer.device, db.saveDevice(id: id, name: name, os: os) else { return }
+            share(id: id, name: name, os: os, from: s)
+            notifyUI()
+        }
+    }
+
+    /// Passes news of a device on to the other links, so a device two hops away still shows its name.
+    /// Only news travels, so names settle after one pass however the devices are linked.
+    private func share(id: String, name: String, os: String, from s: Session) {
+        for o in sessions where o !== s && o.peer.map({ $0.readsDevices && $0.device != id }) == true {
+            o.send(.device(id: id, name: name, os: os))
         }
     }
 

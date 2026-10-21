@@ -61,11 +61,20 @@ class Hello:
     version: str
     clock: float
 
+    @property
+    def reads_devices(self):
+        """Whether the peer reads device frames. Earlier versions close the link on a frame type they don't know.
+        A build without a release number (a dev or test build) runs this code, so it does."""
+        parts = self.version.split(".")
+        if not all(p.isascii() and p.isdigit() for p in parts):
+            return True
+        return [int(p) for p in parts] >= [1, 6, 2]
+
 
 # Frames are (name, fields...) tuples, with the same names as the Swift enum.
-HELLO, SUMMARY, PUT, TOMBSTONE, FETCH, CHUNK, CANCEL, APPLIED, PING, PONG, OFFER = range(1, 12)
+HELLO, SUMMARY, PUT, TOMBSTONE, FETCH, CHUNK, CANCEL, APPLIED, PING, PONG, OFFER, DEVICE = range(1, 13)
 NAMES = {1: "hello", 2: "summary", 3: "put", 4: "tombstone", 5: "fetch", 6: "chunk",
-         7: "cancel", 8: "applied", 9: "ping", 10: "pong", 11: "offer"}
+         7: "cancel", 8: "applied", 9: "ping", 10: "pong", 11: "offer", 12: "device"}
 
 
 def is_bulk(frame):
@@ -95,7 +104,8 @@ class _W:
 
 def encode(frame):
     """frame is (code, payload): hello Hello, summary [Stamp], put Entry, tombstone Stamp,
-    fetch (hash, index, offset), chunk (hash, index, offset, total, data), cancel/applied/offer hash, ping/pong float."""
+    fetch (hash, index, offset), chunk (hash, index, offset, total, data), cancel/applied/offer hash, ping/pong float,
+    device (id, name, os)."""
     code, p = frame
     w = _W()
     w.u8(code)
@@ -120,6 +130,8 @@ def encode(frame):
         w.str(p)
     elif code in (PING, PONG):
         w.f64(p)
+    elif code == DEVICE:
+        w.str(p[0]); w.str(p[1]); w.str(p[2])
     else:
         raise ValueError(code)
     body = b"".join(w.parts)
@@ -197,6 +209,8 @@ def decode(body):
         p = r.str()
     elif code in (PING, PONG):
         p = r.f64()
+    elif code == DEVICE:
+        p = (r.str(), r.str(), r.str())
     else:
         raise Malformed()
     if r.remaining:

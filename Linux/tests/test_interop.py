@@ -38,7 +38,7 @@ class SwiftPeer(unittest.TestCase):
         huge_here.write_bytes(huge_data[::-1])
         env = dict(os.environ, CLIPBUBBLE_HOME=str(peer_home), CLIPBUBBLE_DOWNLOADS=str(peer_home / "Downloads"),
                    CLIPBUBBLE_DEVICE_NAME="Mac", CLIPBUBBLE_CHILD="serve", SEED_TEXT="mac-old", SEED_FILE=str(big), SEED_BIG=str(huge),
-                   LIVE_TEXT=live_there)
+                   LIVE_TEXT=live_there, SEED_DEVICE="iphone-relayed|iPhone|ios")
 
         db = DB()
         db.upsert("text", "linux-old", None, "Terminal", "t:" + sha("linux-old"))
@@ -46,6 +46,7 @@ class SwiftPeer(unittest.TestCase):
         db.insert(Entry("f:" + sha(str(big)), time.time() - 1, "file", "big file.bin", "Files", "mac-device",
                         (Blob("big file.bin", len(big_data), ""),)), "mac-device")
         db.upsert("file", str(huge_here), None, "Files", "f:" + sha(str(huge_here)))
+        db.save_device("windows-relayed", "Desktop", "windows")
         e = eng.Engine()
         seen = []
         e.on_transfers = lambda t: seen.extend(t.items())
@@ -62,6 +63,7 @@ class SwiftPeer(unittest.TestCase):
         self.assertTrue(wait_for(lambda: db.exists(mac_text)), "the Mac's history arrives")
         self.assertTrue(db.clip(hash=mac_text).origin, "marked as from the Mac")
         self.assertIn("Mac", db.device_names().values())
+        self.assertTrue(wait_for(lambda: db.device_names().get("iphone-relayed") == "iPhone"), "a device the Mac knows arrives with its name")
         self.assertTrue(wait_for(lambda: (c := db.clip(hash=file_hash)) is not None and not c.remote), "a download cut off by a dropped link finishes on the next one")
         landed = db.clip(hash=file_hash).paths[0]
         self.assertEqual(Path(landed).read_bytes(), big_data)
@@ -113,6 +115,7 @@ class SwiftPeer(unittest.TestCase):
         self.assertIn("deleted|t:" + sha(live), lines, "the delete reached the Mac")
         self.assertTrue(any(l.startswith("clip|i:" + sha(png) + "|") and l.endswith("|false|true") for l in lines),
                         "the image is stored on the Mac")
+        self.assertIn("device|windows-relayed|Desktop", lines, "a device this side knows reaches the Mac with its name")
 
     def test_same_device_dialling_again_replaces_its_link(self):
         peer_home = Path(HOME) / "swift-redial"

@@ -110,6 +110,12 @@ struct LibraryView: View {
         .toast(model.toast)
     }
 
+    /// Devices with something in the library. Names arrive for every device a computer knows, used or not.
+    private var sources: [(key: String, value: String)] {
+        let used = Set(all.map(\.origin))
+        return model.devices.filter { used.contains($0.key) }.sorted { $0.value < $1.value }
+    }
+
     private var filters: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -121,7 +127,7 @@ struct LibraryView: View {
                     Picker("From", selection: $from) {
                         Text("Everywhere").tag(String?.none)
                         Text("This iPhone").tag(String?.some(""))
-                        ForEach(model.devices.sorted { $0.value < $1.value }, id: \.key) { Text($0.value).tag(String?.some($0.key)) }
+                        ForEach(sources, id: \.key) { Text($0.value).tag(String?.some($0.key)) }
                     }
                 } label: {
                     Label(from.map { $0.isEmpty ? "This iPhone" : model.devices[$0] ?? "Device" } ?? "From", systemImage: "laptopcomputer.and.iphone")

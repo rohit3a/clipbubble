@@ -17,7 +17,7 @@ from . import store, sync
 from .store import DB, DIR, IMAGES, sha
 from .sync import CHUNK, Entry, Hello, Stamp, Blob
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 
 def log(line):
@@ -336,7 +336,12 @@ class Engine:
             s.offset = p.clock - time.time()
             if abs(s.offset) > 30:
                 log(f"{p.name}'s clock is {int(s.offset)} s off")
-            self.db.save_device(p.device, p.name, p.os)
+            if self.db.save_device(p.device, p.name, p.os):
+                self.share((p.device, p.name, p.os), s)
+            if p.reads_devices:
+                for d in self.db.devices():
+                    if d[0] != p.device:
+                        s.send((sync.DEVICE, tuple(d)))
             if s.link:
                 s.link.hello_received(p)
             log(f"linked with {p.name} ({p.os} {p.version})")
@@ -391,6 +396,20 @@ class Engine:
             if p in s.offered and c and c.remote:
                 s.download(self.make_download(s.offered[p], s, False))
                 self.watch_transfers()
+        elif code == sync.DEVICE:
+            if s.peer is None:
+                s.close()
+                return
+            if p[0] not in (self.device, s.peer.device) and self.db.save_device(*p):
+                self.share(p, s)
+                self.on_received()
+
+    def share(self, device, s):
+        """Passes news of a device on to the other links, so a device two hops away still shows its name.
+        Only news travels, so names settle after one pass however the devices are linked."""
+        for o in self.sessions:
+            if o is not s and o.peer and o.peer.reads_devices and o.peer.device != device[0]:
+                o.send((sync.DEVICE, device))
 
     def received(self, e, s):
         st = e.stamp

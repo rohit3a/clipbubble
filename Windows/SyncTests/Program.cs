@@ -68,6 +68,7 @@ static class Program
         ["ping"] = new Ping(1792000005.125),
         ["pong"] = new Pong(1792000005.125),
         ["offer"] = new Offer("f:9"),
+        ["device"] = new DeviceInfo("ad03-rog", "ROG Strix ☕", "linux"),
     };
 
     static string Hex(byte[] b) => string.Concat(b.Select(x => x.ToString("x2")));
@@ -170,6 +171,18 @@ static class Program
             Check(db.Stamps().Any(s => s.Hash == "t:gone" && s.Deleted), "summaries carry the delete");
             Db.Changed = null;
             db.DeleteAll();
+        }),
+
+        ("device frames go to 1.6.2 and later, and saving a device reports news", () =>
+        {
+            bool Reads(string v) => new Hello(1, "", "", "", v, 0).ReadsDevices;
+            Check(!Reads("1.6.1") && !Reads("1.5.0") && !Reads("1.6"), "releases before 1.6.2 close the link on them");
+            Check(Reads("1.6.2") && Reads("1.6.10") && Reads("1.7") && Reads("2.0.0") && Reads("dev"), "1.6.2, later and dev builds read them");
+            using var db = new Db();
+            Check(db.SaveDevice("dev-3", "ROG", "linux"), "a new device is news");
+            Check(!db.SaveDevice("dev-3", "ROG", "linux"), "the same device again isn't");
+            Check(db.SaveDevice("dev-3", "ROG 2", "linux"), "a new name is news");
+            Check(db.Devices().Contains(new DeviceInfo("dev-3", "ROG 2", "linux")), "devices come back with their OS");
         }),
 
         ("synced rows: waiting, bump, tombstone, received", () =>
@@ -317,6 +330,7 @@ static class Program
         {
             ["CLIPBUBBLE_HOME"] = peerHome, ["CLIPBUBBLE_DOWNLOADS"] = Path.Combine(peerHome, "Downloads"), ["CLIPBUBBLE_DEVICE_NAME"] = "Mac",
             ["CLIPBUBBLE_CHILD"] = "serve", ["SEED_TEXT"] = "mac-old", ["SEED_FILE"] = big, ["SEED_BIG"] = huge, ["LIVE_TEXT"] = liveThere,
+            ["SEED_DEVICE"] = "iphone-relayed|iPhone|ios",
         };
 
         using var db = new Db();
@@ -324,6 +338,7 @@ static class Program
         // Left from a link that dropped mid-download: the row is here, the bytes aren't.
         db.Insert(new Entry("f:" + Sha(big), Engine.Now - 1, "file", "big file.bin", "Files", "mac-device", new[] { new Blob("big file.bin", bigData.Length, "") }), "mac-device");
         db.Upsert(ClipKind.File, hugeHere, null, "Explorer", "f:" + Sha(hugeHere));
+        db.SaveDevice("linux-relayed", "ROG", "linux");
         var e = new Engine("Windows test");
         var seen = new List<(string Hash, Transfer T)>();
         var applied = new List<string>();
@@ -342,6 +357,7 @@ static class Program
         Check(WaitFor(() => db.Exists(macText)), "the Mac's history arrives");
         Check(db.ByHash(macText)!.Origin.Length > 0, "marked as from the Mac");
         Check(db.DeviceNames().ContainsValue("Mac"), "the Mac's name is saved");
+        Check(WaitFor(() => db.DeviceNames().GetValueOrDefault("iphone-relayed") == "iPhone"), "a device the Mac knows arrives with its name");
         Check(WaitFor(() => db.ByHash(fileHash) is { Remote: false }), "a download cut off by a dropped link finishes on the next one");
         var landed = db.ByHash(fileHash)!.Paths[0];
         Check(File.ReadAllBytes(landed).SequenceEqual(bigData), "the file's bytes match");
@@ -396,6 +412,7 @@ static class Program
         Check(lines.Any(l => l.StartsWith("clip|t:" + Sha("windows-old") + "|")), "the Mac got this history");
         Check(lines.Contains("deleted|t:" + Sha(live)), "the delete reached the Mac");
         Check(lines.Any(l => l.StartsWith("clip|i:" + Sha(png) + "|") && l.EndsWith("|false|true")), "the image is stored on the Mac");
+        Check(lines.Contains("device|linux-relayed|ROG"), "a device this side knows reaches the Mac with its name");
     }
 }
 
