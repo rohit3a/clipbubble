@@ -27,6 +27,12 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillAppear(animated)
         model.appear(fullAccess: hasFullAccess, globe: needsInputModeSwitchKey)
     }
+
+    /// A dismissed keyboard can stay alive in the background; it lets go of the link so the app can have it.
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if hasFullAccess { SyncEngine.shared.suspend(true) }
+    }
 }
 
 @MainActor
@@ -39,6 +45,7 @@ final class KeyboardModel: ObservableObject {
     @Published var note: String?
     /// Counts each time the keyboard comes up.
     @Published var opened = 0
+    private var viaApp = false
     private weak var keyboard: UIInputViewController?
     private var started = false
     private lazy var db = DB()
@@ -53,8 +60,11 @@ final class KeyboardModel: ObservableObject {
         self.globe = globe
         guard fullAccess else { return }
         opened += 1
-        reload()
+        // Inside the ClipBubble app, the app already holds the link and this keyboard reads what it syncs.
+        viaApp = Platform.defaults.bool(forKey: "app.active")
         let engine = SyncEngine.shared
+        engine.suspend(viaApp)
+        reload()
         if !started {
             started = true
             engine.onReceived = { [weak self] in self?.reload() }
@@ -72,9 +82,10 @@ final class KeyboardModel: ObservableObject {
             copy(c)
         }
         let live = SyncEngine.shared.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
-        linked = !live.isEmpty
+        linked = viaApp || !live.isEmpty
         status = SyncEngine.enabledHosts.isEmpty ? "No computers linked yet"
-            : linked ? live.joined(separator: ", ") : SyncEngine.shared.statuses.values.first?.text ?? "Connecting…"
+            : viaApp ? "Synced by the ClipBubble app"
+            : !live.isEmpty ? live.joined(separator: ", ") : SyncEngine.shared.statuses.values.first?.text ?? "Connecting…"
     }
 
     func tap(_ c: Clip) {

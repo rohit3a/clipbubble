@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 import VisionKit
@@ -6,6 +7,7 @@ import VisionKit
 struct ClipBubbleApp: App {
     @StateObject private var model = Model()
     @AppStorage("appearance") private var appearance = Appearance.system
+    @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
         WindowGroup {
@@ -16,6 +18,12 @@ struct ClipBubbleApp: App {
                     for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
                         scene.windows.forEach { $0.overrideUserInterfaceStyle = appearance.style }
                     }
+                }
+                // While the app is open it holds the link, and the keyboard leaves it alone (see SyncEngine.suspend).
+                .onChange(of: phase, initial: true) {
+                    guard phase != .inactive else { return }
+                    Platform.defaults.set(phase == .active, forKey: "app.active")
+                    SyncEngine.shared.suspend(phase == .background)
                 }
         }
     }
@@ -98,6 +106,41 @@ final class Model: ObservableObject {
         }
     }
 
+    func addText(_ t: String) {
+        added(Inbox.text(t, source: "iPhone").map { [$0] } ?? [])
+    }
+
+    func addFiles(_ urls: [URL]) {
+        added(urls.compactMap { Inbox.file($0, source: "iPhone") })
+    }
+
+    /// Pictures join as images, so they paste as pictures on the computer; videos join as files.
+    func addPhotos(_ items: [PhotosPickerItem]) {
+        say("Adding…")
+        Task {
+            var hashes: [String] = []
+            for item in items {
+                let h: String?
+                if item.supportedContentTypes.contains(where: { $0.conforms(to: .image) }), let d = try? await item.loadTransferable(type: Data.self) {
+                    h = await Task.detached { Inbox.image(d, source: "iPhone") }.value
+                } else if let f = try? await item.loadTransferable(type: PickedFile.self) {
+                    h = Inbox.file(f.url, source: "iPhone")
+                } else { h = nil }
+                if let h { hashes.append(h) }
+            }
+            added(hashes)
+        }
+    }
+
+    /// Something added by hand is meant for the computers now, so files go over without waiting for Get.
+    private func added(_ hashes: [String]) {
+        reload()
+        guard !hashes.isEmpty else { return say("Couldn't add that") }
+        let engine = SyncEngine.shared
+        for h in hashes where h.hasPrefix("f:") { engine.linked.forEach { engine.send(h, toDevice: $0.device) } }
+        say(hosts.isEmpty ? "Added" : statuses.values.contains { $0.ok } ? "Sent to your computers" : "Added, sends when linked")
+    }
+
     func open(_ url: URL) {
         guard url.host == "pair" else { return }
         pairing = "Linking…"
@@ -124,6 +167,10 @@ final class Model: ObservableObject {
 struct HistoryView: View {
     @EnvironmentObject var model: Model
     @State private var showSettings = false
+    @State private var adding: Adding?
+    @State private var photos: [PhotosPickerItem] = []
+
+    enum Adding: Identifiable { case text, photos, files; var id: Self { self } }
 
     var body: some View {
         NavigationStack {
@@ -181,17 +228,84 @@ struct HistoryView: View {
                             .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
-                    // The system Paste button reads the clipboard without the "Allow Paste" prompt.
-                    PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { model.paste($0) }
-                        .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.large)
-                        .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
+                    HStack(spacing: 10) {
+                        // The system Paste button reads the clipboard without the "Allow Paste" prompt.
+                        PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { model.paste($0) }
+                            .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.large)
+                        Menu {
+                            Button { adding = .text } label: { Label("Text", systemImage: "text.cursor") }
+                            Button { adding = .photos } label: { Label("Photos & Videos", systemImage: "photo.on.rectangle") }
+                            Button { adding = .files } label: { Label("Files", systemImage: "folder") }
+                        } label: {
+                            Label("Add", systemImage: "plus").font(.body.weight(.semibold))
+                                .padding(.horizontal, 18).frame(height: 50)
+                                .background(.regularMaterial, in: Capsule())
+                        }
+                    }
+                    .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
                 }
                 .padding(.bottom, 8)
             }
             .animation(.spring(duration: 0.3), value: model.toast)
+            .sheet(isPresented: Binding(get: { adding == .text }, set: { if !$0 { adding = nil } })) {
+                TextComposer { model.addText($0) }
+            }
+            .photosPicker(isPresented: Binding(get: { adding == .photos }, set: { if !$0 { adding = nil } }),
+                          selection: $photos, maxSelectionCount: 20, matching: .any(of: [.images, .videos]))
+            .onChange(of: photos) {
+                guard !photos.isEmpty else { return }
+                model.addPhotos(photos)
+                photos = []
+            }
+            .fileImporter(isPresented: Binding(get: { adding == .files }, set: { if !$0 { adding = nil } }),
+                          allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                if case .success(let urls) = result { model.addFiles(urls) }
+            }
             .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
                 Button("OK") { model.pairing = nil }
             } message: { Text(model.pairing ?? "") }
+        }
+    }
+}
+
+/// Type or paste a note to add to the history.
+struct TextComposer: View {
+    let add: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $text)
+                .focused($focused)
+                .padding(.horizontal, 12)
+                .navigationTitle("New text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Add") { add(text); dismiss() }
+                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .onAppear { focused = true }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// A video or other file from the photo library, copied somewhere that outlives the picker.
+struct PickedFile: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .item) { received in
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dest = dir.appendingPathComponent(received.file.lastPathComponent)
+            try FileManager.default.copyItem(at: received.file, to: dest)
+            return PickedFile(url: dest)
         }
     }
 }
