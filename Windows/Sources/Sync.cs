@@ -45,11 +45,11 @@ sealed record Hello(int Proto, string Device, string Name, string Os, string Ver
         get
         {
             var parts = Version.Split('.');
-            if (!parts.All(p => p.Length > 0 && p.All(char.IsAsciiDigit))) return true;
+            if (!parts.All(p => p.Length > 0 && p.All(c => c >= '0' && c <= '9'))) return true;
             int[] since = [1, 6, 2];
             for (var i = 0; i < Math.Max(parts.Length, since.Length); i++)
             {
-                var have = i < parts.Length ? int.Parse(parts[i]) : -1;
+                var have = i < parts.Length ? (int.TryParse(parts[i], out var n) ? n : int.MaxValue) : -1;
                 var want = i < since.Length ? since[i] : -1;
                 if (have != want) return have > want;
             }
