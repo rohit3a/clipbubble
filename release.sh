@@ -13,7 +13,7 @@ OUT=dist
 rm -rf $OUT && mkdir -p $OUT/stage
 CLIPBUBBLE_TIMESTAMP=1 ./package.sh $OUT/stage/ClipBubble.app
 APP=$OUT/stage/ClipBubble.app
-ID=$(codesign -dv $APP 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p')
+ID=$(codesign -dvv $APP 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p')
 notarize() { xcrun notarytool submit "$1" --keychain-profile clipbubble --wait; xcrun stapler staple "$2"; }
 if [[ -n $ID ]]; then
   ditto -c -k --keepParent $APP $OUT/notarize.zip
