@@ -207,7 +207,7 @@ struct KeyboardChip: View {
     var body: some View {
         Group {
             if let p = clip.imagePath, !clip.remote {
-                Thumb(p, pixels: 540).scaledToFill().frame(height: 58).clipped()
+                Color.clear.frame(height: 58).overlay { Thumb(p, pixels: 540).scaledToFill() }.clipped()
             } else {
                 HStack(alignment: .top, spacing: 4) {
                     if clip.kind != "text" { Image(systemName: clip.remote ? "icloud.and.arrow.down" : "doc") }

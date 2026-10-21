@@ -11,7 +11,12 @@ struct ClipBubbleApp: App {
         WindowGroup {
             HistoryView().environmentObject(model)
                 .onOpenURL { model.open($0) }
-                .preferredColorScheme(appearance.scheme)
+                // Set on the window, not with preferredColorScheme, which leaves sheets behind and doesn't switch back to System.
+                .onChange(of: appearance, initial: true) {
+                    for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+                        scene.windows.forEach { $0.overrideUserInterfaceStyle = appearance.style }
+                    }
+                }
         }
     }
 }
@@ -19,9 +24,9 @@ struct ClipBubbleApp: App {
 enum Appearance: String, CaseIterable {
     case system = "System", light = "Light", dark = "Dark"
 
-    var scheme: ColorScheme? {
+    var style: UIUserInterfaceStyle {
         switch self {
-        case .system: return nil
+        case .system: return .unspecified
         case .light: return .light
         case .dark: return .dark
         }
@@ -158,29 +163,30 @@ struct HistoryView: View {
                         .padding(.top, model.hosts.isEmpty ? 220 : 120)
                 }
             }
-            .searchable(text: $model.query, prompt: "Search history")
+            .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search history")
             .refreshable { model.redialAll() }
             .navigationTitle("ClipBubble")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    // The system Paste button reads the clipboard without the "Allow Paste" prompt.
-                    PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { model.paste($0) }
-                        .labelStyle(.iconOnly)
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Settings")
                 }
             }
             .sheet(isPresented: $showSettings) { HostsView().environmentObject(model) }
             .safeAreaInset(edge: .bottom) {
-                if let t = model.toast {
-                    Label(t, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.regularMaterial, in: Capsule())
-                        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-                        .padding(.bottom, 8)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                VStack(spacing: 10) {
+                    if let t = model.toast {
+                        Label(t, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 16).padding(.vertical, 10)
+                            .background(.regularMaterial, in: Capsule())
+                            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    // The system Paste button reads the clipboard without the "Allow Paste" prompt.
+                    PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { model.paste($0) }
+                        .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.large)
+                        .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
                 }
+                .padding(.bottom, 8)
             }
             .animation(.spring(duration: 0.3), value: model.toast)
             .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
@@ -242,7 +248,9 @@ struct ClipRow: View {
                 .frame(width: 30, height: 30).background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 6) {
                 if let p = clip.imagePath, !clip.remote {
-                    Thumb(p, pixels: 900).scaledToFill().frame(height: 150).frame(maxWidth: .infinity)
+                    // The frame sets the size and the image fills it, so a wide screenshot can't push the row out.
+                    Color.clear.frame(height: 150).frame(maxWidth: .infinity)
+                        .overlay { Thumb(p, pixels: 900).scaledToFill() }
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                 } else {
                     Text(clip.kind == "file" ? clip.paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
