@@ -37,6 +37,8 @@ final class KeyboardModel: ObservableObject {
     @Published var fullAccess = true
     @Published var globe = false
     @Published var note: String?
+    /// Counts each time the keyboard comes up.
+    @Published var opened = 0
     private weak var keyboard: UIInputViewController?
     private var started = false
     private lazy var db = DB()
@@ -50,6 +52,7 @@ final class KeyboardModel: ObservableObject {
         self.fullAccess = fullAccess
         self.globe = globe
         guard fullAccess else { return }
+        opened += 1
         reload()
         let engine = SyncEngine.shared
         if !started {
@@ -75,6 +78,7 @@ final class KeyboardModel: ObservableObject {
     }
 
     func tap(_ c: Clip) {
+        tick()
         if c.kind == "text" {
             keyboard?.textDocumentProxy.insertText(c.text)
         } else if c.remote {
@@ -92,9 +96,12 @@ final class KeyboardModel: ObservableObject {
         flash(c.imagePath != nil ? "Image copied. Touch and hold the text box, then Paste." : "Copied. Touch and hold the text box, then Paste.")
     }
 
-    func type(_ s: String) { keyboard?.textDocumentProxy.insertText(s) }
-    func backspace() { keyboard?.textDocumentProxy.deleteBackward() }
+    func type(_ s: String) { tick(); keyboard?.textDocumentProxy.insertText(s) }
+    func backspace() { tick(); keyboard?.textDocumentProxy.deleteBackward() }
     func nextKeyboard() { keyboard?.advanceToNextInputMode() }
+
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+    private func tick() { haptic.impactOccurred(intensity: 0.6) }
 
     private func flash(_ s: String) {
         note = s
@@ -110,7 +117,7 @@ struct KeyboardView: View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(model.linked ? Color.green : Color.orange).frame(width: 7, height: 7)
-                Text(model.note ?? model.status).font(.caption.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
+                Text(model.note ?? model.status).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
             }
             .padding(.horizontal, 10).padding(.top, 6)
@@ -127,39 +134,70 @@ struct KeyboardView: View {
                     .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     .padding(.horizontal, 20).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
-                        ForEach(model.clips, id: \.hash) { c in
-                            Button { model.tap(c) } label: { KeyboardChip(clip: c) }.buttonStyle(.plain)
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                            ForEach(model.clips, id: \.hash) { c in
+                                Button { model.tap(c) } label: { KeyboardChip(clip: c) }.buttonStyle(Pressable())
+                            }
                         }
+                        .padding(.horizontal, 6)
                     }
-                    .padding(.horizontal, 6)
+                    .crispEdges()
+                    // The newest copy is what you're most likely after, so every time the keyboard opens it's in view.
+                    .onChange(of: model.opened) { scroll.scrollTo(model.clips.first?.hash, anchor: .top) }
+                    .onChange(of: model.clips.first?.hash) { withAnimation { scroll.scrollTo(model.clips.first?.hash, anchor: .top) } }
                 }
             }
 
             HStack(spacing: 6) {
                 if model.globe {
-                    key(Image(systemName: "globe"), width: 44) { model.nextKeyboard() }
+                    key(Image(systemName: "globe"), width: 44, function: true) { model.nextKeyboard() }
                 }
                 key(Text("space"), width: nil) { model.type(" ") }
-                key(Image(systemName: "delete.left"), width: 52) { model.backspace() }
+                key(Image(systemName: "delete.left"), width: 52, function: true) { model.backspace() }
                     .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                         deleting = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in Task { @MainActor in model.backspace() } }
                     })
                     .simultaneousGesture(DragGesture(minimumDistance: 0).onEnded { _ in deleting?.invalidate(); deleting = nil })
-                key(Image(systemName: "return"), width: 60) { model.type("\n") }
+                key(Image(systemName: "return"), width: 60, function: true) { model.type("\n") }
             }
             .padding(.horizontal, 6).padding(.bottom, 6)
         }
     }
 
-    private func key<L: View>(_ label: L, width: CGFloat?, action: @escaping () -> Void) -> some View {
+    private func key<L: View>(_ label: L, width: CGFloat?, function: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            label.font(.body).frame(maxWidth: width ?? .infinity).frame(width: width, height: 42)
-                .background(Color(.systemBackground).opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
-                .shadow(color: .black.opacity(0.25), radius: 0, y: 1)
+            label.font(.system(size: 18)).foregroundStyle(Color(.label))
+                .frame(maxWidth: width ?? .infinity).frame(width: width, height: 42)
+                .background(function ? KeyColor.function : KeyColor.letter, in: RoundedRectangle(cornerRadius: 8))
+                .shadow(color: .black.opacity(0.3), radius: 0, y: 1)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Pressable())
+    }
+}
+
+/// The system keyboard's key colors, so ClipBubble sits right next to it in light and dark.
+private enum KeyColor {
+    static let letter = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.42, alpha: 1) : .white })
+    static let function = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.27, alpha: 1) : UIColor(red: 0.67, green: 0.70, blue: 0.74, alpha: 1) })
+    static let chip = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : .white })
+}
+
+/// Keys and items dip when touched, like the system keyboard.
+private struct Pressable: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .brightness(configuration.isPressed ? -0.08 : 0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private extension View {
+    /// iOS 26 blurs and fades content scrolling under the edges, which smears the top row of items.
+    @ViewBuilder func crispEdges() -> some View {
+        if #available(iOS 26, *) { scrollEdgeEffectHidden(true, for: .all) } else { self }
     }
 }
 
@@ -178,12 +216,13 @@ struct KeyboardChip: View {
                         .lineLimit(2).multilineTextAlignment(.leading)
                     Spacer(minLength: 0)
                 }
-                .font(.footnote).padding(8).frame(height: 58, alignment: .topLeading)
+                .font(.footnote).foregroundStyle(Color(.label)).padding(8).frame(height: 58, alignment: .topLeading)
             }
         }
         .frame(maxWidth: .infinity)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+        .background(KeyColor.chip)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: .black.opacity(0.25), radius: 0, y: 1)
         .contentShape(Rectangle())
     }
 }
