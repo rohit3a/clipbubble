@@ -15,9 +15,8 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "1.6.1"
     CURRENT_PROJECT_VERSION: "1"
-    # Simulator builds sign to run locally. For a phone, set DEVELOPMENT_TEAM and switch the style to Automatic.
-    CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: BHAM5T9649
+    CODE_SIGN_STYLE: Automatic
 # The sync engine, store and SSH go into every target: the app, the share extension and the keyboard each link on their own.
 targetTemplates:
   Synced:
