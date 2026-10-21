@@ -10,6 +10,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Microsoft.Win32.SafeHandles;
 
 namespace ClipBubble;
 
@@ -367,7 +368,7 @@ sealed class FolderWatcher : IDisposable
     /// Every 5 s: starts watching once the folder exists, and again if it was renamed or replaced, because Windows
     /// keeps watching a renamed folder under its new name and says nothing.
     readonly DispatcherTimer check = new() { Interval = TimeSpan.FromSeconds(5) };
-    DateTime watchedCreated;
+    (uint Volume, ulong Index)? watchedId;
     /// Null until the folder could be listed once. Until then only files created after `since` count as new,
     /// so a folder that appears later (Snipping Tool's first save) reports its new screenshot, while one that was
     /// missing or unreadable for a while (an unplugged drive) doesn't report everything already in it.
@@ -409,10 +410,10 @@ sealed class FolderWatcher : IDisposable
         check.Start();
         if (!Directory.Exists(Folder)) return;
         // A different folder than last time (renamed and made again, deleted and restored): its files aren't new,
-        // except ones made since it was last seen fine. A date that can't be read is taken as the same folder.
-        var created = Created(Folder);
-        if (watchedCreated != default && created != DateTime.MinValue && created != watchedCreated) known = null;
-        if (created != DateTime.MinValue) watchedCreated = created;
+        // except ones made since it was last seen fine. One that can't be told apart is taken as the same folder.
+        var id = Identity(Folder);
+        if (watchedId != null && id != null && id != watchedId) known = null;
+        if (id != null) watchedId = id;
         var dispatcher = Dispatcher.CurrentDispatcher;
         var w = new FileSystemWatcher(Folder) { NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName, IncludeSubdirectories = false };
         FileSystemEventHandler changed = (_, _) => dispatcher.BeginInvoke(new Action(() => { debounce.Stop(); debounce.Start(); }));
@@ -436,12 +437,12 @@ sealed class FolderWatcher : IDisposable
     {
         if (checking) return;
         checking = true;
-        var (dispatcher, watching, created, probed) = (Dispatcher.CurrentDispatcher, watcher != null, watchedCreated, DateTime.Now);
+        var (dispatcher, watching, id, probed) = (Dispatcher.CurrentDispatcher, watcher != null, watchedId, DateTime.Now);
         Task.Run(() =>
         {
             var exists = Directory.Exists(Folder);
-            var now = exists ? Created(Folder) : DateTime.MinValue;
-            var replaced = exists && now != DateTime.MinValue && created != default && now != created;
+            var now = exists ? Identity(Folder) : null;
+            var replaced = now != null && id != null && now != id;
             var restart = watching ? !exists || replaced : exists;
             dispatcher.BeginInvoke(new Action(() =>
             {
@@ -449,7 +450,7 @@ sealed class FolderWatcher : IDisposable
                 if (stopped) return;
                 if (restart) { Restart(); return; }
                 if (watching && exists) since = probed;
-                if (watchedCreated == default && now != DateTime.MinValue) watchedCreated = now;   // its date became readable
+                if (watchedId == null && now != null) watchedId = now;   // it became readable
             }));
         });
     }
@@ -461,11 +462,21 @@ sealed class FolderWatcher : IDisposable
         Start();
     }
 
-    static DateTime Created(string folder)
+    /// Which folder is at that path, by its file ID. Not its creation date: NTFS hands a folder made within seconds
+    /// of renaming the old one the old one's date. Null when it can't be read.
+    static (uint, ulong)? Identity(string folder)
     {
-        try { return Directory.GetCreationTimeUtc(folder); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return DateTime.MinValue; }
+        const uint readAttributes = 0x80, shareAll = 7, openExisting = 3, backupSemantics = 0x02000000;   // needed to open a folder
+        using var h = CreateFile(folder, readAttributes, shareAll, IntPtr.Zero, openExisting, backupSemantics, IntPtr.Zero);
+        if (h.IsInvalid || !GetFileInformationByHandle(h, out var info)) return null;
+        return (info.VolumeSerialNumber, (ulong)info.FileIndexHigh << 32 | info.FileIndexLow);
     }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct HandleInfo { public uint Attributes; public long Created, Accessed, Written; public uint VolumeSerialNumber, SizeHigh, SizeLow, Links, FileIndexHigh, FileIndexLow; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(SafeFileHandle h, out HandleInfo info);
 
     public static DateTime Added(string path)
     {
