@@ -1,4 +1,5 @@
 import UIKit
+import UniformTypeIdentifiers
 
 /// What the shared sync engine needs from iOS. The app, the share extension and the keyboard all use one App Group,
 /// so they share the history, the linked computers and the SSH key.
@@ -37,18 +38,24 @@ enum Clipboard {
         case "text":
             UIPasteboard.general.string = c.text
         case "image":
-            guard let f = c.file, let img = UIImage(contentsOfFile: f) else { return false }
-            UIPasteboard.general.image = img
+            guard let f = c.file, writeImage(f) else { return false }
         default:
             let urls = c.paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
             guard !urls.isEmpty else { return false }
-            if urls.count == 1, isImagePath(urls[0].path), let img = UIImage(contentsOfFile: urls[0].path) {
-                UIPasteboard.general.image = img
-            } else {
+            if urls.count != 1 || !isImagePath(urls[0].path) || !writeImage(urls[0].path) {
                 // Paste lands the file itself in Mail, Messages and Files.
                 UIPasteboard.general.itemProviders = urls.compactMap { NSItemProvider(contentsOf: $0) }
             }
         }
+        return true
+    }
+
+    /// The file's own bytes under its type: no decode and re-encode, so a big screenshot copies at once.
+    private static func writeImage(_ path: String) -> Bool {
+        guard let type = UTType(filenameExtension: (path as NSString).pathExtension), type.conforms(to: .image),
+              let data = FileManager.default.contents(atPath: path)
+        else { return false }
+        UIPasteboard.general.setData(data, forPasteboardType: type.identifier)
         return true
     }
 }

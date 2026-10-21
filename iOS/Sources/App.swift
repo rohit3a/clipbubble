@@ -186,8 +186,8 @@ struct ClipRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let p = clip.imagePath, !clip.remote, let img = UIImage(contentsOfFile: p) {
-                Image(uiImage: img).resizable().scaledToFit().frame(maxHeight: 120).clipShape(RoundedRectangle(cornerRadius: 8))
+            if let p = clip.imagePath, !clip.remote {
+                Thumb(p, pixels: 720).scaledToFit().frame(maxHeight: 120).clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 Text(clip.kind == "file" ? clip.paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
                      : clip.kind == "image" ? "Image" : clip.text)
