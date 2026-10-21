@@ -4,7 +4,7 @@ import UIKit
 /// Shortcuts, Siri, Back Tap and the Action button: send to the computers without opening ClipBubble.
 struct SendToComputers: AppIntent {
     static let title: LocalizedStringResource = "Send to Computers"
-    static let description = IntentDescription("Puts text or a file on the clipboard of your linked computers. With neither, it sends what's on this iPhone's clipboard.")
+    static let description = IntentDescription("Puts text or a file on the clipboard of your linked computers. With neither, it sends what's on this device's clipboard.")
 
     @Parameter(title: "Text") var text: String?
     @Parameter(title: "File") var file: IntentFile?
@@ -34,7 +34,7 @@ struct SendToComputers: AppIntent {
 /// The other way: whatever you copied last on a computer, onto this iPhone's clipboard.
 struct CopyLatestFromComputers: AppIntent {
     static let title: LocalizedStringResource = "Copy Latest from Computers"
-    static let description = IntentDescription("Links to your computers, puts the newest item in ClipBubble's history on this iPhone's clipboard, and returns its text.")
+    static let description = IntentDescription("Links to your computers, puts the newest item in ClipBubble's history on this device's clipboard, and returns its text.")
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
