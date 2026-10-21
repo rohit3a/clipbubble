@@ -12,7 +12,6 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "1.6.2"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: BHAM5T9649
@@ -20,6 +19,10 @@ settings:
 # The sync engine, store and SSH go into every target: the app, the share extension and the keyboard each link on their own.
 targetTemplates:
   Synced:
+    # On the targets, not the project: XcodeGen's iOS preset sets "1,2" on every target, which made it an iPad app too.
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
     sources:
       - Shared
       - ../Sources/Sync.swift
