@@ -2,9 +2,9 @@ name: Windows
 
 on:
   push:
-    paths: ['Windows/**', 'Tests/fixtures/sync/**', '.github/workflows/windows.yml']
+    paths: ['Windows/**', 'Tests/fixtures/**', '.github/workflows/windows.yml']
   pull_request:
-    paths: ['Windows/**', 'Tests/fixtures/sync/**', '.github/workflows/windows.yml']
+    paths: ['Windows/**', 'Tests/fixtures/**', '.github/workflows/windows.yml']
   release:
     types: [published]
   workflow_dispatch:

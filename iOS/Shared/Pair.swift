@@ -1,21 +1,22 @@
 import Foundation
 import Network
 
-/// The phone's half of pairing (the Mac's is Sources/Pairing.swift): a `clipbubble://pair` link from the Mac's QR code
-/// says where the Mac is and carries a one-time code. The phone sends its key; the Mac answers with its user and host key.
+/// The phone's half of pairing (the computer's is Sources/Pairing.swift, Linux/clipbubble/pairing.py or
+/// Windows/Sources/Pairing.cs): a `clipbubble://pair` link from the computer's QR code says where it is and carries a
+/// one-time code. The phone sends its key; the computer answers with its user and host key.
 enum Pairing {
     enum Failure: LocalizedError {
         case badLink, unreachable, refused(String)
         var errorDescription: String? {
             switch self {
             case .badLink: return "That isn't a ClipBubble pairing code."
-            case .unreachable: return "Couldn't reach the Mac. Is this iPhone on the same Wi-Fi?"
+            case .unreachable: return "Couldn't reach the computer. Is this iPhone on the same Wi-Fi?"
             case .refused(let why): return why
             }
         }
     }
 
-    /// Returns the new link's alias (`user@host`) and the Mac's name.
+    /// Returns the new link's alias (`user@host`) and the computer's name.
     static func pair(_ url: URL) async throws -> (alias: String, name: String) {
         guard url.scheme == "clipbubble", url.host == "pair",
               let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
@@ -24,23 +25,38 @@ enum Pairing {
               let code = q.first(where: { $0.name == "c" })?.value else { throw Failure.badLink }
         var req = try JSONSerialization.data(withJSONObject: ["code": code, "key": Keys.publicKey, "name": Platform.deviceName])
         req.append(10)
-        for host in hosts {
-            guard let reply = await exchange(host: host, port: port, send: req) else { continue }
-            guard let r = try? JSONSerialization.jsonObject(with: reply) as? [String: Any], r["ok"] as? Bool == true,
-                  let user = r["user"] as? String else {
-                throw Failure.refused("The Mac said no. Show a new code on the Mac and scan it again.")
+        // Every address at once, so one a firewall drops costs nothing. The first (the .local name, which survives a
+        // new IP address) gets a head start, since all of them reach the same computer.
+        let replies = await withTaskGroup(of: (String, [String: Any]?).self) { group in
+            for (i, host) in hosts.enumerated() {
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: UInt64(i) * 300_000_000)
+                    guard !Task.isCancelled, let d = await exchange(host: host, port: port, send: req) else { return (host, nil) }
+                    return (host, try? JSONSerialization.jsonObject(with: d) as? [String: Any])
+                }
             }
-            // Trusts exactly the key the Mac reported, so even the first SSH connection is checked.
-            if let key = r["hostKey"] as? String, !key.isEmpty { Platform.defaults.set(key, forKey: "sync.hostkey.\(host):22") }
-            return ("\(user)@\(host)", r["name"] as? String ?? host)
+            var out: [(String, [String: Any])] = []
+            for await (host, r) in group {
+                guard let r else { continue }
+                out.append((host, r))
+                if r["ok"] as? Bool == true { group.cancelAll(); break }
+            }
+            return out
         }
-        throw Failure.unreachable
+        guard let (host, r) = replies.first(where: { $0.1["ok"] as? Bool == true }), let user = r["user"] as? String else {
+            guard let no = replies.first?.1 else { throw Failure.unreachable }
+            throw Failure.refused(no["error"] as? String ?? "The computer said no. Show a new code there and scan it again.")
+        }
+        // Trusts exactly the key the computer reported, so even the first SSH connection is checked.
+        if let key = r["hostKey"] as? String, !key.isEmpty { Platform.defaults.set(key, forKey: "sync.hostkey.\(host):22") }
+        return ("\(user)@\(host)", r["name"] as? String ?? host)
     }
 
-    /// One line out, one line back, or nil if the host can't be reached within a few seconds.
+    /// One line out, one line back, or nil if the host can't be reached within a few seconds. Once connected it waits
+    /// up to two minutes for the answer: Windows asks its user before adding the key.
     private static func exchange(host: String, port: UInt16, send: Data) async -> Data? {
-        await withCheckedContinuation { cont in
-            let c = NWConnection(host: .init(host), port: .init(rawValue: port)!, using: .tcp)
+        let c = NWConnection(host: .init(host), port: .init(rawValue: port)!, using: .tcp)
+        return await withTaskCancellationHandler { await withCheckedContinuation { cont in
             let q = DispatchQueue(label: "clipbubble.pair")
             var done = false
             func finish(_ d: Data?) {
@@ -66,7 +82,8 @@ enum Pairing {
                 }
             }
             c.start(queue: q)
-            q.asyncAfter(deadline: .now() + 4) { finish(nil) }
-        }
+            q.asyncAfter(deadline: .now() + 4) { if case .ready = c.state {} else { finish(nil) } }
+            q.asyncAfter(deadline: .now() + 120) { finish(nil) }
+        } } onCancel: { c.cancel() }
     }
 }

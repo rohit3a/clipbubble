@@ -11,7 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import board, mascots  # noqa: E402
+from . import board, mascots, pairing, qr  # noqa: E402
 from .capture import Capture  # noqa: E402
 from .engine import Engine, log, ssh_hosts, state_text  # noqa: E402
 from .shell import NAME as SHELL_NAME, Shell  # noqa: E402
@@ -89,6 +89,17 @@ def downloads_folder():
 
 
 _thumbs = {}
+
+
+def qr_texture(text, px=4):
+    """A QR code as an image: black on white with the quiet zone, `px` pixels a module."""
+    m = qr.encode(text)
+    n = len(m) + 8
+    def row(y):
+        return bytes(c for x in range(n) for c in (0 if 4 <= y < n - 4 and 4 <= x < n - 4 and m[y - 4][x - 4] else 255,) * 3 * px)
+    data = b"".join(row(y) * px for y in range(n))
+    pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, False, 8, n * px, n * px, n * px * 3)
+    return Gdk.Texture.new_for_pixbuf(pixbuf)
 
 
 def thumb(path, px):
@@ -760,6 +771,12 @@ class App(Gtk.Application):
 
         self.section("Sync over SSH")
         self.note("Copy on one machine, paste on another, using your SSH config and keys.")
+        b = Gtk.Button(label="Link iPhone…", halign=Gtk.Align.START, margin_top=4)
+        b.connect("clicked", self.start_pairing)
+        self.settings_box.append(b)
+        self.pair_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=4)
+        self.settings_box.append(self.pair_box)
+        self.show_pairing()
         self.host_labels = {}
         hosts = ssh_hosts()
         enabled = set(Prefs.get("sync.hosts", []))
@@ -798,6 +815,42 @@ class App(Gtk.Application):
         quit_.connect("clicked", lambda _b: self.quit_app())
         actions.append(quit_)
         self.settings_box.append(actions)
+
+    def start_pairing(self, _b):
+        if getattr(self, "pairing", None):
+            self.pairing.stop()
+        self.pairing = None
+        if not pairing.ssh_server_on():
+            self.pair_state = (None, "Start the SSH server first, so the iPhone can reach this computer. "
+                                     "On Ubuntu or Debian: sudo apt install openssh-server")
+        else:
+            self.pairing = pairing.Server(self.engine.name, lambda name: GLib.idle_add(self.pairing_done, name),
+                                          lambda: GLib.idle_add(self.pairing_done, None))
+            hint = pairing.firewall_hint()
+            self.pair_state = (self.pairing.link(), "Scan with the iPhone's Camera, or in ClipBubble on the iPhone. "
+                                                    "It needs the same Wi-Fi as this computer." + (f" {hint}." if hint else ""))
+        self.show_pairing()
+
+    def pairing_done(self, name):
+        self.pairing = None
+        self.pair_state = (None, f"Linked {name}. It syncs whenever ClipBubble is open there." if name else
+                           "That code expired. Press Link iPhone… for a new one.")
+        self.show_pairing()
+        return False
+
+    def show_pairing(self):
+        box = getattr(self, "pair_box", None)
+        if box is None:
+            return
+        while box.get_first_child():
+            box.remove(box.get_first_child())
+        link, text = getattr(self, "pair_state", (None, None))
+        if link:
+            box.append(Gtk.Picture(paintable=qr_texture(link), can_shrink=False, halign=Gtk.Align.START))
+        if text:
+            l = Gtk.Label(label=text, xalign=0, wrap=True)
+            l.add_css_class("dim")
+            box.append(l)
 
     def refresh_hosts(self):
         paused = bool(Prefs.get("sync.paused"))
