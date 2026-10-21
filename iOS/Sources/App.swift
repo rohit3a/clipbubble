@@ -73,6 +73,11 @@ final class Model: ObservableObject {
         devices = db.deviceNames()
     }
 
+    /// Everything kept, for the Library.
+    func library(query: String) -> [Clip] {
+        db.clips(limit: 5000, query: query.isEmpty ? nil : query)
+    }
+
     func add(_ alias: String) {
         guard SSHTarget(alias) != nil, !hosts.contains(alias) else { return }
         hosts.append(alias)
@@ -166,59 +171,22 @@ final class Model: ObservableObject {
 
 struct HistoryView: View {
     @EnvironmentObject var model: Model
+    @State private var tab = Tab.recent
     @State private var showSettings = false
     @State private var adding: Adding?
     @State private var photos: [PhotosPickerItem] = []
 
-    enum Adding: Identifiable { case text, photos, files; var id: Self { self } }
+    enum Tab { case recent, library }
+    enum Adding { case text, photos, files }
 
     var body: some View {
         NavigationStack {
-            List {
-                if model.hosts.isEmpty {
-                    Section {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Image(systemName: "laptopcomputer.and.iphone").font(.title).foregroundStyle(.tint)
-                            Text("Copy on your iPhone, paste on your computer, and back.").font(.headline)
-                            Text("Link a Mac, Linux or Windows computer running ClipBubble.").font(.subheadline).foregroundStyle(.secondary)
-                            Button("Link a computer") { showSettings = true }.buttonStyle(.borderedProminent).padding(.top, 2)
-                        }
-                        .padding(.vertical, 8)
-                    }
-                } else {
-                    Section {
-                        ForEach(model.hosts, id: \.self) { h in HostRow(alias: h, state: model.statuses[h]) }
-                    }
-                }
-                Section {
-                    ForEach(model.clips, id: \.hash) { c in
-                        ClipRow(clip: c, device: model.devices[c.origin])
-                            .contentShape(Rectangle())
-                            .onTapGesture { model.copy(c) }
-                            .swipeActions { Button("Delete", role: .destructive) { model.delete(c) } }
-                            .contextMenu { ClipMenu(clip: c) }
-                    }
-                } header: {
-                    if !model.clips.isEmpty { Text("Recent") }
+            Group {
+                switch tab {
+                case .recent: recent
+                case .library: LibraryView()
                 }
             }
-            .overlay {
-                if model.clips.isEmpty {
-                    ContentUnavailableView(model.query.isEmpty ? "Nothing copied yet" : "No matches",
-                                           systemImage: model.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass",
-                                           description: Text(model.query.isEmpty ? "Copy something on a linked computer, or paste it here." : "Try other words."))
-                        .padding(.top, model.hosts.isEmpty ? 220 : 120)
-                }
-            }
-            .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search history")
-            .refreshable { model.redialAll() }
-            .navigationTitle("ClipBubble")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Settings")
-                }
-            }
-            .sheet(isPresented: $showSettings) { HostsView().environmentObject(model) }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 10) {
                     if let t = model.toast {
@@ -228,25 +196,11 @@ struct HistoryView: View {
                             .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
-                    HStack(spacing: 10) {
-                        // The system Paste button reads the clipboard without the "Allow Paste" prompt.
-                        PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { model.paste($0) }
-                            .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.large)
-                        Menu {
-                            Button { adding = .text } label: { Label("Text", systemImage: "text.cursor") }
-                            Button { adding = .photos } label: { Label("Photos & Videos", systemImage: "photo.on.rectangle") }
-                            Button { adding = .files } label: { Label("Files", systemImage: "folder") }
-                        } label: {
-                            Label("Add", systemImage: "plus").font(.body.weight(.semibold))
-                                .padding(.horizontal, 18).frame(height: 50)
-                                .background(.regularMaterial, in: Capsule())
-                        }
-                    }
-                    .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
+                    BottomBar(tab: $tab, settings: { showSettings = true }, add: { adding = $0 }, paste: model.paste)
                 }
-                .padding(.bottom, 8)
             }
             .animation(.spring(duration: 0.3), value: model.toast)
+            .sheet(isPresented: $showSettings) { HostsView().environmentObject(model) }
             .sheet(isPresented: Binding(get: { adding == .text }, set: { if !$0 { adding = nil } })) {
                 TextComposer { model.addText($0) }
             }
@@ -264,6 +218,107 @@ struct HistoryView: View {
             .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
                 Button("OK") { model.pairing = nil }
             } message: { Text(model.pairing ?? "") }
+        }
+    }
+
+    private var recent: some View {
+        List {
+            if model.hosts.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Image(systemName: "laptopcomputer.and.iphone").font(.title).foregroundStyle(.tint)
+                        Text("Copy on your iPhone, paste on your computer, and back.").font(.headline)
+                        Text("Link a Mac, Linux or Windows computer running ClipBubble.").font(.subheadline).foregroundStyle(.secondary)
+                        Button("Link a computer") { showSettings = true }.buttonStyle(.borderedProminent).padding(.top, 2)
+                    }
+                    .padding(.vertical, 8)
+                }
+            } else {
+                Section {
+                    ForEach(model.hosts, id: \.self) { h in HostRow(alias: h, state: model.statuses[h]) }
+                }
+            }
+            Section {
+                ForEach(model.clips, id: \.hash) { c in
+                    ClipRow(clip: c, device: model.devices[c.origin])
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.copy(c) }
+                        .swipeActions { Button("Delete", role: .destructive) { model.delete(c) } }
+                        .contextMenu { ClipMenu(clip: c) }
+                }
+            } header: {
+                if !model.clips.isEmpty { Text("Recent") }
+            }
+        }
+        .overlay {
+            if model.clips.isEmpty {
+                ContentUnavailableView(model.query.isEmpty ? "Nothing copied yet" : "No matches",
+                                       systemImage: model.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass",
+                                       description: Text(model.query.isEmpty ? "Copy something on a linked computer, or paste it here." : "Try other words."))
+                    .padding(.top, model.hosts.isEmpty ? 220 : 120)
+            }
+        }
+        .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search history")
+        .refreshable { model.redialAll() }
+        .navigationTitle("ClipBubble")
+    }
+}
+
+/// One glass bar for the whole app: the two screens, then Add, Paste and Settings, all the same size.
+struct BottomBar: View {
+    @Binding var tab: HistoryView.Tab
+    let settings: () -> Void
+    let add: (HistoryView.Adding) -> Void
+    let paste: ([NSItemProvider]) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            slot("clock", "Recent", selected: tab == .recent) { tab = .recent }
+            slot("square.grid.2x2", "Library", selected: tab == .library) { tab = .library }
+            Menu {
+                Button { add(.text) } label: { Label("Text", systemImage: "text.cursor") }
+                Button { add(.photos) } label: { Label("Photos & Videos", systemImage: "photo.on.rectangle") }
+                Button { add(.files) } label: { Label("Files", systemImage: "folder") }
+            } label: {
+                Image(systemName: "plus").font(.system(size: 20, weight: .semibold))
+                    .frame(width: 44, height: 44).background(Color.primary.opacity(0.1), in: Circle())
+                    .frame(maxWidth: .infinity)
+            }
+            .accessibilityLabel("Add")
+            // The system Paste button reads the clipboard without the "Allow Paste" prompt. Its look is the system's,
+            // so it's a circle the size of Add's.
+            PasteButton(supportedContentTypes: [.image, .fileURL, .url, .plainText, .data]) { paste($0) }
+                .labelStyle(.iconOnly).buttonBorderShape(.circle).controlSize(.large)
+                .frame(maxWidth: .infinity)
+            slot("gearshape", "Settings", selected: false, action: settings)
+        }
+        .foregroundStyle(.primary)
+        .padding(6)
+        .glassCapsule()
+        .padding(.horizontal, 24)
+        .padding(.bottom, 4)
+        .sensoryFeedback(.selection, trigger: tab)
+    }
+
+    private func slot(_ symbol: String, _ name: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 19, weight: selected ? .semibold : .regular))
+                .frame(width: 56, height: 44)
+                .background(selected ? Color.primary.opacity(0.12) : .clear, in: Capsule())
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(name)
+    }
+}
+
+private extension View {
+    @ViewBuilder func glassCapsule() -> some View {
+        if #available(iOS 26, *) {
+            glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            background(.regularMaterial, in: Capsule()).shadow(color: .black.opacity(0.15), radius: 12, y: 4)
         }
     }
 }
@@ -379,24 +434,8 @@ struct ClipRow: View {
         .padding(.vertical, 4)
     }
 
-    private var icon: String {
-        if clip.remote { return "icloud.and.arrow.down" }
-        switch clip.kind {
-        case "text": return clip.text.hasPrefix("http") ? "link" : "text.alignleft"
-        case "image": return "photo"
-        default: return clip.imagePath != nil ? "photo" : "doc"
-        }
-    }
-
-    private var color: Color {
-        switch icon {
-        case "link": return .blue
-        case "photo": return .purple
-        case "doc": return .orange
-        case "icloud.and.arrow.down": return .teal
-        default: return .gray
-        }
-    }
+    private var icon: String { clip.remote ? "icloud.and.arrow.down" : clip.look.symbol }
+    private var color: Color { clip.remote ? .teal : clip.look.tint }
 }
 
 struct HostsView: View {
