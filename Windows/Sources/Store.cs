@@ -394,8 +394,27 @@ sealed partial class Db : IDisposable
         else Run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash);
     }
 
-    public void SaveDevice(string id, string name, string os) =>
-        Run("INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os", id, name, os);
+    /// Whether this was news: a device not seen before, or one with a new name.
+    public bool SaveDevice(string id, string name, string os)
+    {
+        Run(@"INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os
+              WHERE name != excluded.name OR os != excluded.os", id, name, os);
+        return sqlite3_changes(h) > 0;
+    }
+
+    public List<DeviceInfo> Devices()
+    {
+        var s = Prepare("SELECT id, name, os FROM devices", Array.Empty<object?>());
+        try
+        {
+            var output = new List<DeviceInfo>();
+            while (sqlite3_step(s) == SQLITE_ROW)
+                output.Add(new DeviceInfo(Marshal.PtrToStringUni(sqlite3_column_text16(s, 0)) ?? "", Marshal.PtrToStringUni(sqlite3_column_text16(s, 1)) ?? "",
+                                          Marshal.PtrToStringUni(sqlite3_column_text16(s, 2)) ?? ""));
+            return output;
+        }
+        finally { sqlite3_finalize(s); }
+    }
 
     public Dictionary<string, string> DeviceNames()
     {

@@ -285,8 +285,12 @@ class DB:
             self.c.execute("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", (file, hash))
 
     def save_device(self, id, name, os_name):
-        self.c.execute("INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os",
-                       (id, name, os_name))
+        """Whether this was news: a device not seen before, or one with a new name."""
+        return self.c.execute("INSERT INTO devices(id,name,os) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
+                              "os=excluded.os WHERE name != excluded.name OR os != excluded.os", (id, name, os_name)).rowcount > 0
+
+    def devices(self):
+        return self.c.execute("SELECT id, name, os FROM devices").fetchall()
 
     def device_names(self):
         return dict(self.c.execute("SELECT id, name FROM devices"))

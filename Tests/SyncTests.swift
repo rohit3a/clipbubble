@@ -18,6 +18,7 @@ let fixtureFrames: [(String, Frame)] = [
     ("ping", .ping(1792000005.125)),
     ("pong", .pong(1792000005.125)),
     ("offer", .offer(hash: "f:9")),
+    ("device", .device(id: "ad03-rog", name: "ROG Strix ☕", os: "linux")),
 ]
 
 func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
@@ -39,6 +40,12 @@ func syncTests() {
         check((try? reader.feed(bytes)) == [frame], "round trip \(name)")
         check(committed.first { $0["name"] == name }?["hex"] == hex(bytes), "fixture bytes \(name)")
     }
+
+    // Only peers on 1.6.2 or later get device frames; a build without a release number is current code.
+    func reads(_ v: String) -> Bool { Hello(proto: 1, device: "", name: "", os: "", version: v, clock: 0).readsDevices }
+    check(!reads("1.6.1") && !reads("1.5.0") && !reads("1.6"), "releases before 1.6.2 don't get device frames")
+    check(reads("1.6.2") && reads("1.6.10") && reads("1.7") && reads("2.0.0"), "1.6.2 and later do")
+    check(reads("dev"), "a dev build does")
 
     // Frames split across reads, and several in one read.
     let all = fixtureFrames.map { $0.1.encoded() }.reduce(Data(), +)

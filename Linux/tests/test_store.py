@@ -53,6 +53,12 @@ class Store(unittest.TestCase):
             store.changed = hook
         self.assertEqual(seen, ["t:w"])
 
+    def test_save_device_reports_news(self):
+        self.assertTrue(self.db.save_device("dev-3", "ROG", "linux"), "a new device is news")
+        self.assertFalse(self.db.save_device("dev-3", "ROG", "linux"), "the same device again isn't")
+        self.assertTrue(self.db.save_device("dev-3", "ROG 2", "linux"), "a new name is news")
+        self.assertIn(("dev-3", "ROG 2", "linux"), self.db.devices())
+
     def test_devices_filter_source(self):
         self.db.save_device("dev-2", "ROG", "linux")
         self.db.insert(Entry("t:r", time.time(), "text", "r", "Terminal", "dev-2"), "dev-2")

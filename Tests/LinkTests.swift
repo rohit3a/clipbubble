@@ -10,8 +10,11 @@ func runChild() -> Never {
             print("clip|\(c.hash)|\(c.origin)|\(c.remote)|\(exists)")
         }
         for s in db.stamps() where s.deleted { print("deleted|\(s.hash)") }
+        for d in db.devices() { print("device|\(d.id)|\(d.name)") }
         exit(0)
     }
+    // A device this side knows only by name, as a Mac knows a Linux box the iPhone has never linked with.
+    if let d = env["SEED_DEVICE"]?.split(separator: "|").map(String.init), d.count == 3 { db.saveDevice(id: d[0], name: d[1], os: d[2]) }
     let minuteAgo = Date().addingTimeInterval(-60)
     if let t = env["SEED_TEXT"] { db.insertIfMissing(kind: "text", text: t, source: "Terminal", hash: "t:" + sha(t), created: minuteAgo) }
     for key in ["SEED_FILE", "SEED_BIG"] {
@@ -79,7 +82,8 @@ func linkTests() {
 
     let p = Process()
     p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    p.environment = childEnv(peerHome, ["CLIPBUBBLE_CHILD": "serve", "SEED_TEXT": "peer-old", "SEED_FILE": big.path, "SEED_BIG": huge.path])
+    p.environment = childEnv(peerHome, ["CLIPBUBBLE_CHILD": "serve", "SEED_TEXT": "peer-old", "SEED_FILE": big.path, "SEED_BIG": huge.path,
+                                         "SEED_DEVICE": "rog-relayed|ROG|linux"])
     let toChild = Pipe(), fromChild = Pipe()
     p.standardInput = toChild
     p.standardOutput = fromChild
@@ -91,6 +95,7 @@ func linkTests() {
     check(waitFor("peer's text") { db.clip(hash: peerText) != nil }, "peer's history arrives")
     check(db.clip(hash: peerText).map { !$0.origin.isEmpty } ?? false, "it's marked as from the peer")
     check(db.deviceNames().values.contains("Peer"), "the peer's name is saved")
+    check(waitFor("relayed name") { db.deviceNames()["rog-relayed"] == "ROG" }, "a device the peer knows arrives with its name")
     check(waitFor("peer's file") { db.clip(hash: fileHash)?.remote == false }, "a 600 KB file arrives in chunks")
     let landed = db.clip(hash: fileHash)?.paths.first
     check(landed.flatMap { FileManager.default.contents(atPath: $0) } == bigData, "the file arrives intact")

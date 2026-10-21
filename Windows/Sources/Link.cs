@@ -64,7 +64,7 @@ sealed record LinkState(string Kind, string Arg = "", double At = 0)
 
 sealed class Engine
 {
-    public const string Version = "1.6.1";
+    public const string Version = "1.6.2";
     public static double Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
     /// Where files from other devices go: Downloads\ClipBubble\<device>. The app sets the real Downloads folder.
@@ -357,7 +357,9 @@ sealed class Engine
                 s.Peer = p;
                 s.Offset = p.Clock - Now;
                 if (Math.Abs(s.Offset) > 30) SyncLog.Write($"{p.Name}'s clock is {(int)s.Offset} s off");
-                db.SaveDevice(p.Device, p.Name, p.Os);
+                if (db.SaveDevice(p.Device, p.Name, p.Os)) Share(new DeviceInfo(p.Device, p.Name, p.Os), s);
+                if (p.ReadsDevices)
+                    foreach (var d in db.Devices().Where(d => d.Id != p.Device)) s.Send(d);
                 s.Link?.HelloReceived(p);
                 SyncLog.Write($"linked with {p.Name} ({p.Os} {p.Version})");
                 PublishStatus();
@@ -415,7 +417,22 @@ sealed class Engine
                     WatchTransfers();
                 }
                 break;
+            case DeviceInfo p:
+                if (s.Peer == null) { s.Close(); return; }
+                if (p.Id != Device && p.Id != s.Peer.Device && db.SaveDevice(p.Id, p.Name, p.Os))
+                {
+                    Share(p, s);
+                    Received();
+                }
+                break;
         }
+    }
+
+    /// Passes news of a device on to the other links, so a device two hops away still shows its name.
+    /// Only news travels, so names settle after one pass however the devices are linked.
+    void Share(DeviceInfo d, Session from)
+    {
+        foreach (var o in Sessions.Where(o => o != from && o.Peer is { ReadsDevices: true } peer && peer.Device != d.Id)) o.Send(d);
     }
 
     void Receive(Entry e, Session s)

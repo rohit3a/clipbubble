@@ -71,8 +71,10 @@ func storeTests() {
     Prefs.set("images", true)
     UserDefaults.standard.removeObject(forKey: "save.images")
 
-    db.saveDevice(id: "rog-id", name: "ROG", os: "linux")
-    db.saveDevice(id: "rog-id", name: "ROG 2", os: "linux")
+    check(db.saveDevice(id: "rog-id", name: "ROG", os: "linux"), "a new device is news")
+    check(!db.saveDevice(id: "rog-id", name: "ROG", os: "linux"), "the same device again isn't")
+    check(db.saveDevice(id: "rog-id", name: "ROG 2", os: "linux"), "a new name is news")
     check(db.deviceNames()["rog-id"] == "ROG 2", "device names update")
+    check(db.devices().contains { $0 == ("rog-id", "ROG 2", "linux") }, "devices come back with their OS")
     DB.changed = nil
 }

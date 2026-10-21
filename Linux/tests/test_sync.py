@@ -24,6 +24,7 @@ FRAMES = {
     "ping": (sync.PING, 1792000005.125),
     "pong": (sync.PONG, 1792000005.125),
     "offer": (sync.OFFER, "f:9"),
+    "device": (sync.DEVICE, ("ad03-rog", "ROG Strix ☕", "linux")),
 }
 
 
@@ -89,6 +90,13 @@ class Merge(unittest.TestCase):
                         state[e.hash] = e
                 results.add(tuple(sorted(state.items())))
             self.assertEqual(len(results), 1)
+
+    def test_device_frames_only_for_new_versions(self):
+        def reads(v):
+            return Hello(1, "", "", "", v, 0).reads_devices
+        self.assertFalse(reads("1.6.1") or reads("1.5.0") or reads("1.6"), "releases before 1.6.2 close the link on them")
+        self.assertTrue(reads("1.6.2") and reads("1.6.10") and reads("1.7") and reads("2.0.0"))
+        self.assertTrue(reads("dev"), "a dev build runs this code")
 
     def test_reconcile(self):
         mine = [Stamp("a", 5, False), Stamp("b", 5, False), Stamp("c", 5, True)]
