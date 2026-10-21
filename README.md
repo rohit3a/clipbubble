@@ -34,11 +34,7 @@
 
 ## Install
 
-**Download:** grab `ClipBubble.dmg` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), open it, and drag `ClipBubble.app` to Applications. The app isn't notarized, so the first launch needs right-click → **Open**, or:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/ClipBubble.app
-```
+**Download:** grab `ClipBubble.dmg` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), open it, and drag `ClipBubble.app` to Applications. It's signed and notarized by Apple, so it opens like any other app.
 
 **Or build from source** (needs the Xcode command line tools):
 

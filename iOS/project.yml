@@ -13,7 +13,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1"
-    MARKETING_VERSION: "1.6.0"
+    MARKETING_VERSION: "1.6.1"
     CURRENT_PROJECT_VERSION: "1"
     # Simulator builds sign to run locally. For a phone, set DEVELOPMENT_TEAM and switch the style to Automatic.
     CODE_SIGN_STYLE: Manual
