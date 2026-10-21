@@ -1,4 +1,4 @@
-"""clipbubble: the app (default), --peer (run by ssh), --peer-stdio (tests), --mcp, --version."""
+"""clipbubble: the app (default), --pair (link an iPhone), --peer (run by ssh), --peer-stdio (tests), --mcp, --version."""
 import os
 import signal
 import sys
@@ -73,6 +73,37 @@ def run_peer_stdio():
     engine.serve_stdio()
 
 
+def run_pair():
+    """Link iPhone from a terminal: for a machine without a desktop, or one you're logged in to over SSH."""
+    import socket
+    import threading
+    from . import pairing, qr
+    if not pairing.ssh_server_on():
+        print("Start the SSH server first, so the iPhone can reach this machine. "
+              "On Ubuntu or Debian: sudo apt install openssh-server")
+        sys.exit(1)
+    done, result = threading.Event(), []
+    server = pairing.Server(os.environ.get("CLIPBUBBLE_DEVICE_NAME") or socket.gethostname(),
+                            lambda name: (result.append(name), done.set()), on_expired=done.set)
+    link = server.link()
+    print(qr.terminal(link))
+    print("Scan this with the iPhone's Camera, or in ClipBubble on the iPhone. It needs the same Wi-Fi as this machine.")
+    print(f"Or open this link on the iPhone: {link}")
+    hint = pairing.firewall_hint()
+    if hint:
+        print(hint)
+    sys.stdout.flush()
+    try:
+        done.wait()
+    except KeyboardInterrupt:
+        server.stop()
+        sys.exit(130)
+    if not result:
+        print("That code expired. Run clipbubble --pair again for a new one.")
+        sys.exit(1)
+    print(f"Linked {result[0]}. It syncs whenever ClipBubble is open there.")
+
+
 def main():
     args = sys.argv[1:]
     if "--version" in args:
@@ -83,6 +114,8 @@ def main():
         relay()
     elif "--peer-stdio" in args:
         run_peer_stdio()
+    elif "--pair" in args:
+        run_pair()
     elif "--mcp" in args:
         from .mcp import Server
         Server().run()

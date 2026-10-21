@@ -82,6 +82,17 @@ static class Program
 
     static IEnumerable<(string, Action)> All() => new (string, Action)[]
     {
+        ("QR codes match the ones a phone read", () =>
+        {
+            // Apple's Vision framework decoded each fixture when it was made, and Linux's encoder matches it too.
+            foreach (var f in JsonDocument.Parse(File.ReadAllText(Path.Combine(Root, "Tests/fixtures/qr/codes.json"))).RootElement.EnumerateArray())
+            {
+                var m = Qr.Encode(f.GetProperty("text").GetString()!);
+                var rows = Enumerable.Range(0, m.GetLength(0)).Select(y => string.Concat(Enumerable.Range(0, m.GetLength(1)).Select(x => m[y, x] ? "1" : "0")));
+                Check(rows.SequenceEqual(f.GetProperty("rows").EnumerateArray().Select(r => r.GetString())), "encodes " + f.GetProperty("text").GetString()![..5]);
+            }
+        }),
+
         ("frames match the Swift bytes", () =>
         {
             var committed = JsonDocument.Parse(File.ReadAllText(Path.Combine(Root, "Tests/fixtures/sync/frames.json"))).RootElement

@@ -9,6 +9,6 @@
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="..\Sources\Sync.cs;..\Sources\Link.cs;..\Sources\Store.cs;*.cs" />
+    <Compile Include="..\Sources\Sync.cs;..\Sources\Link.cs;..\Sources\Store.cs;..\Sources\Qr.cs;*.cs" />
   </ItemGroup>
 </Project>

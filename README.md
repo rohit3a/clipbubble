@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>A tiny bubble that remembers everything you copy.</b><br>
-  Clipboard history for macOS and Windows with a mascot, a magnet, and an MCP server for your AI agents.
+  Clipboard history for macOS, Windows and Linux with a mascot, a magnet, and an MCP server for your AI agents.<br>
+  Plus an iPhone app that syncs with any of them.
 </p>
 
 <p align="center">
@@ -73,13 +74,36 @@ What's different on Windows:
 - Auto-paste needs no permission. Apps running as administrator only get a copy, because Windows blocks typing into them.
 - Copies marked as secret by password managers (`ExcludeClipboardContentFromMonitorProcessing`) are never stored.
 - History lives in `%LOCALAPPDATA%\ClipBubble`.
-- Sync over SSH uses the OpenSSH client built into Windows. For other machines to link to this PC, turn on the OpenSSH Server feature and keep `ClipBubble.exe` in `%LOCALAPPDATA%\Programs\ClipBubble`, where `build.ps1` puts it.
+- Sync over SSH uses the OpenSSH client built into Windows. For other machines to link to this PC, turn on the OpenSSH Server feature and keep `ClipBubble.exe` in `%LOCALAPPDATA%\Programs\ClipBubble`, where `build.ps1` puts it. **Link iPhone…** in Settings turns the server on for you.
 
 For MCP, use the path of your `ClipBubble.exe`, or copy the setup prompt from Settings:
 
 ```powershell
 claude mcp add --scope user clipbubble -- "$env:LOCALAPPDATA\Programs\ClipBubble\ClipBubble.exe" --mcp
 ```
+
+## Linux
+
+The Linux version lives in [`Linux/`](Linux). It's a Python app with the same history database, sync and MCP tools, plus a small GNOME Shell extension that watches copies, shows the bubble and pastes. It needs Python 3.8 or later, and GNOME with GTK 4 for the panel, which Ubuntu and Fedora come with. Without a desktop it still syncs and serves MCP.
+
+**Download:** grab `ClipBubble-Linux.tar.gz` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), then run:
+
+```bash
+tar xzf ClipBubble-Linux.tar.gz && ClipBubble-Linux/install.sh
+```
+
+`install.sh` installs ClipBubble for your user in `~/.local` and starts it at login. Run it again to update. Log out and back in once so GNOME loads the extension.
+
+## iPhone
+
+The iPhone app lives in [`iOS/`](iOS). It shows the history from your computers, takes anything you share to it, and adds a keyboard that types from your history in any app. It syncs with a Mac, a Windows PC or a Linux computer over SSH on your Wi-Fi, so it gives you a Universal Clipboard with computers Apple's doesn't reach.
+
+**Link a computer:** on the computer, open ClipBubble → Settings → Sync over SSH → **Link iPhone…**, and scan the code with the iPhone's Camera. On Linux without a desktop, run `clipbubble --pair` and scan the code it prints. The iPhone sends its key over your Wi-Fi, and the computer lets that key run ClipBubble and nothing else.
+- On Windows, the first link asks to turn on OpenSSH Server, which the iPhone connects to. Installing it can take a few minutes.
+- On Linux, the SSH server must be running (`sudo apt install openssh-server` on Ubuntu). If your firewall is on, let the iPhone through once with `sudo ufw allow 22,47821/tcp`.
+- The iPhone syncs while ClipBubble or its keyboard is open, because iOS doesn't let apps keep a connection in the background.
+
+**Install:** the app isn't on the App Store yet. To try it now, open `iOS/` in Xcode on a Mac and run it on your iPhone.
 
 ## Keys
 

@@ -1,0 +1,47 @@
+name: Linux
+
+on:
+  push:
+    paths: ['Linux/**', 'Tests/fixtures/**', '.github/workflows/linux.yml']
+  pull_request:
+    paths: ['Linux/**', 'Tests/fixtures/**', '.github/workflows/linux.yml']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Read-only by default. Only the release job below can write, and only when a release is published.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Tests that need a desktop (PyGObject) or the Swift engine skip themselves here.
+      - run: cd Linux && python3 -m unittest discover -s tests -t . -q
+      - run: |
+          mkdir -p stage/ClipBubble-Linux
+          cp -R Linux/clipbubble Linux/extension Linux/install.sh Linux/clipbubble.service stage/ClipBubble-Linux/
+          find stage -name __pycache__ -prune -exec rm -rf {} +
+          tar -czf ClipBubble-Linux.tar.gz -C stage ClipBubble-Linux
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ClipBubble-Linux
+          path: ClipBubble-Linux.tar.gz
+
+  # Publishing a release (from the Mac, as usual) attaches the Linux build to it.
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ClipBubble-Linux
+      - run: gh release upload "$TAG" ClipBubble-Linux.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}

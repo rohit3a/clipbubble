@@ -444,11 +444,11 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("On your Mac, open ClipBubble → Settings → Sync over SSH → Link iPhone…, then scan the code with this iPhone's Camera.")
+                    Text("On your Mac, Windows PC or Linux computer, open ClipBubble → Settings → Sync over SSH → Link iPhone…, then scan the code with this iPhone's Camera.")
                     if DataScannerViewController.isSupported {
                         Button { scanning = true } label: { Label("Scan code", systemImage: "qrcode.viewfinder") }
                     }
-                } header: { Text("Link a Mac") }
+                } header: { Text("Link a computer") }
 
                 if !model.hosts.isEmpty {
                     Section("Computers") {
@@ -497,7 +497,7 @@ struct SettingsView: View {
     }
 }
 
-/// The camera, looking for the Mac's pairing code.
+/// The camera, looking for a computer's pairing code.
 struct Scanner: UIViewControllerRepresentable {
     let found: (URL) -> Void
 

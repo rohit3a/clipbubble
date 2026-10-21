@@ -297,7 +297,8 @@ static class UI
         Search = Glyph(0xE721), Clear = Glyph(0xEB90), Gear = Glyph(0xE713), Clipboard = Glyph(0xE77F),
         Link = Glyph(0xE71B), Camera = Glyph(0xE722), Download = Glyph(0xE896), Back = Glyph(0xE76B), Ok = Glyph(0xEC61),
         Warning = Glyph(0xE7BA), Off = Glyph(0xE738), Plus = Glyph(0xE710), Copy = Glyph(0xE8C8), Check = Glyph(0xE73E),
-        Power = Glyph(0xE7E8), Keyboard = Glyph(0xE765), Network = Glyph(0xE968), Pause = Glyph(0xE769), Close = Glyph(0xE711);
+        Power = Glyph(0xE7E8), Keyboard = Glyph(0xE765), Network = Glyph(0xE968), Pause = Glyph(0xE769), Close = Glyph(0xE711),
+        Phone = Glyph(0xE8EA);
 
     /// Line height follows SF Pro (1.2x) rather than Segoe's taller default, so rows sit where they do on the Mac.
     public static TextBlock Label(string text, double size, Brush? color = null, FontWeight? weight = null) => new()
@@ -1527,6 +1528,9 @@ sealed class SettingsView : Grid
     readonly StackPanel content = new() { Margin = new Thickness(16) };
     readonly DispatcherTimer ticker = new() { Interval = TimeSpan.FromSeconds(2) };
     readonly DispatcherTimer copiedReset = new() { Interval = TimeSpan.FromSeconds(1.6) };
+    /// Link iPhone: the open pairing, the link its QR code shows, and what to tell the user.
+    Pairing? pairing;
+    string? pairLink, pairNote;
 
     public SettingsView(Model model, App app)
     {
@@ -1696,6 +1700,11 @@ sealed class SettingsView : Grid
     {
         var sync = Section("Sync over SSH");
         sync.Children.Add(Note("Copy on one PC, paste on another, using your SSH config and keys.", top: 0));
+        var link = Button("Link iPhone…", UI.Phone, StartPairing);
+        link.Margin = new Thickness(0, 6, 0, 0);
+        sync.Children.Add(link);
+        if (pairLink != null) sync.Children.Add(QrImage(pairLink));
+        if (pairNote != null) sync.Children.Add(Note(pairNote, top: 4));
         var enabled = new HashSet<string>(Engine.Hosts);
         var paused = Engine.Paused;
         var hosts = Engine.SshHosts();
@@ -1709,6 +1718,55 @@ sealed class SettingsView : Grid
         var linked = model.Sync?.Linked.Select(p => p.Name).ToList() ?? new List<string>();
         sync.Children.Add(Note($"This PC shows up as {model.Sync?.Name ?? Environment.MachineName}." +
             (linked.Count > 0 ? $" Linked now: {string.Join(", ", linked)}." : "") + " Files up to 25 MB move on their own."));
+    }
+
+    /// Shows a code for the iPhone to scan. The first time, Windows asks to turn on OpenSSH Server, which the phone
+    /// connects to.
+    void StartPairing()
+    {
+        pairing?.Stop();
+        pairing = null;
+        pairLink = null;
+        pairNote = "Checking OpenSSH Server…";
+        Render();
+        var name = model.Sync?.Name ?? Environment.MachineName;
+        void Show(string? link, string note) => Dispatcher.BeginInvoke(new Action(() => { pairLink = link; pairNote = note; Render(); }));
+        Task.Run(() =>
+        {
+            try
+            {
+                if (!Pairing.Ready())
+                {
+                    Show(null, "Windows will ask to turn on OpenSSH Server, which the iPhone connects to. The first time can take a few minutes.");
+                    Pairing.SetUp();
+                }
+                var p = new Pairing(name, note => Show(null, note));
+                Dispatcher.BeginInvoke(new Action(() => pairing = p));
+                Show(p.Link, "Scan with the iPhone's Camera, or in ClipBubble on the iPhone. It needs the same Wi-Fi as this PC.");
+            }
+            catch (PairingException e) { Show(null, e.Message); }
+        });
+    }
+
+    /// Black on white with the quiet zone, four pixels a module, kept sharp at any display scale.
+    static Image QrImage(string text)
+    {
+        var m = Qr.Encode(text);
+        int size = m.GetLength(0), px = 4, w = (size + 8) * px;
+        var pixels = new byte[w * w];
+        for (var y = 0; y < w; y++)
+            for (var x = 0; x < w; x++)
+            {
+                int my = y / px - 4, mx = x / px - 4;
+                pixels[y * w + x] = my >= 0 && my < size && mx >= 0 && mx < size && m[my, mx] ? (byte)0 : (byte)255;
+            }
+        var img = new Image
+        {
+            Source = BitmapSource.Create(w, w, 96, 96, PixelFormats.Gray8, null, pixels, w),
+            Width = w, Height = w, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0),
+        };
+        RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.NearestNeighbor);
+        return img;
     }
 
     void SetHost(string host, bool on)

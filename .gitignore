@@ -10,3 +10,4 @@ iOS/Info.plist
 iOS/*.entitlements
 iOS/build/
 dist/
+__pycache__/
