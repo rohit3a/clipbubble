@@ -32,6 +32,7 @@ final class SyncEngine {
     private var wanted: Set<String> = []
     private var progressTimer: DispatchSourceTimer?
     private var lastTransfers: [String: Transfer] = [:]
+    private var suspended = false
 
     private init() {
         let idFile = Paths.dir.appendingPathComponent("device-id")
@@ -127,6 +128,17 @@ final class SyncEngine {
         DispatchQueue.main.async { self.onTransfers(all) }
     }
 
+    /// An iPhone's app and keyboard share one device ID, and a computer keeps only the newest link from a device,
+    /// so two of them linked at once knock each other off. Only the one on screen links; the other suspends.
+    func suspend(_ on: Bool) {
+        queue.async { [self] in
+            guard on != suspended else { return }
+            suspended = on
+            if on { sessions.forEach { $0.close() } }
+            reconcileLinks()
+        }
+    }
+
     func setPaused(_ paused: Bool) {
         Platform.defaults.set(paused, forKey: "sync.paused")
         queue.async { [self] in
@@ -139,7 +151,7 @@ final class SyncEngine {
     private(set) var statuses: [String: LinkState] = [:]
 
     private func reconcileLinks() {
-        let want = Self.paused ? [] : Set(Self.enabledHosts)
+        let want = Self.paused || suspended ? [] : Set(Self.enabledHosts)
         for (alias, link) in links where !want.contains(alias) {
             link.stop()
             links[alias] = nil
