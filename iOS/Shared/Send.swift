@@ -102,8 +102,11 @@ enum Courier {
         let hashes = await add()
         guard !hashes.isEmpty else { return "Couldn't save that." }
         guard linked else {
-            let why = engine.statuses.values.first { !$0.ok }?.text ?? "Offline"
-            return "Saved. \(why), so it goes over next time."
+            // Connecting or offline needs nothing from you; anything else (an untrusted host, a missing key) does.
+            switch engine.statuses.values.first(where: { !$0.ok }) {
+            case nil, .connecting?, .offline?: return "Saved. It goes to your computer next time ClipBubble connects."
+            case let s?: return "Saved. \(s.text). It goes over once that's fixed."
+            }
         }
         let names = engine.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
         status("Sending to \(names.joined(separator: ", "))…")
