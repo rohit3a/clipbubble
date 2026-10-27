@@ -16,6 +16,7 @@ final class ShareViewController: UIViewController {
         host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         host.didMove(toParent: self)
 
+        DB().prune()
         let providers = (extensionContext?.inputItems as? [NSExtensionItem] ?? []).flatMap { $0.attachments ?? [] }
         Task { @MainActor in
             let message = await Courier.deliver(status: { [state] in state.text = $0 }) { [state] in

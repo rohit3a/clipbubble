@@ -176,15 +176,20 @@ final class DB {
     }
 
     /// Only images ClipBubble stored itself are deleted; screenshots, downloads and copied files belong to the user.
-    /// Deletes only files ClipBubble made in its own folder: stored images, and on iPhone what you added or received.
-    /// Files you copied in Finder, or that landed in ~/Downloads on a computer, are yours and stay.
+    /// Deletes only files ClipBubble made: stored images everywhere, and on iPhone what you added (sent/) or received.
+    /// A file you copied in Finder or that landed in ~/Downloads on a computer is yours and stays, whatever its path.
     private func removeFiles(_ clips: [Clip]) {
-        let own = Paths.dir.path + "/", sent = Paths.dir.appendingPathComponent("sent").path
+        let sent = Paths.dir.appendingPathComponent("sent").resolvingSymlinksInPath().path
+        let managed = [Paths.images.resolvingSymlinksInPath().path]
+            + (Platform.os == "ios" ? [sent, receivedFolder("").deletingLastPathComponent().resolvingSymlinksInPath().path] : [])
         for c in clips {
-            for f in [c.file].compactMap({ $0 }) + c.paths where f.hasPrefix(own) {
-                try? FileManager.default.removeItem(atPath: f)
+            let files = c.kind == "image" ? [c.file].compactMap { $0 } : Platform.os == "ios" ? c.paths : []
+            for f in files {
+                let real = URL(fileURLWithPath: f).resolvingSymlinksInPath().path
+                guard managed.contains(where: { real.hasPrefix($0 + "/") }) else { continue }
+                try? FileManager.default.removeItem(atPath: real)
                 // A file added on the iPhone sits alone in a folder under sent/.
-                let parent = (f as NSString).deletingLastPathComponent
+                let parent = (real as NSString).deletingLastPathComponent
                 if (parent as NSString).deletingLastPathComponent == sent { try? FileManager.default.removeItem(atPath: parent) }
             }
         }

@@ -31,6 +31,7 @@ final class KeyboardViewController: UIInputViewController {
     /// A dismissed keyboard can stay alive in the background; it lets go of the link so the app can have it.
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        model.disappear()
         if hasFullAccess { SyncEngine.shared.suspend(true) }
     }
 }
@@ -60,10 +61,9 @@ final class KeyboardModel: ObservableObject {
         self.globe = globe
         guard fullAccess else { return }
         opened += 1
-        // Inside the ClipBubble app, the app already holds the link and this keyboard reads what it syncs.
-        viaApp = Date().timeIntervalSince1970 - Platform.defaults.double(forKey: "app.alive") < 10
+        db.prune()
+        checkApp()
         let engine = SyncEngine.shared
-        engine.suspend(viaApp)
         reload()
         if !started {
             started = true
@@ -73,6 +73,27 @@ final class KeyboardModel: ObservableObject {
         } else {
             SyncEngine.enabledHosts.forEach(engine.redial)
         }
+    }
+
+    /// Inside the ClipBubble app, the app holds the link and this keyboard reads what it syncs. Checked again every few
+    /// seconds, so if the app quits or crashes the keyboard takes the link back.
+    private var watching: Timer?
+    private func checkApp() {
+        let was = viaApp
+        viaApp = Date().timeIntervalSince1970 - Platform.defaults.double(forKey: "app.alive") < 10
+        if was != viaApp || watching == nil { SyncEngine.shared.suspend(viaApp) }
+        if viaApp && watching == nil {
+            watching = .scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkApp() } }
+        } else if !viaApp {
+            watching?.invalidate()
+            watching = nil
+            reload()
+        }
+    }
+
+    func disappear() {
+        watching?.invalidate()
+        watching = nil
     }
 
     func reload() {
@@ -125,6 +146,7 @@ struct KeyboardView: View {
     @State private var deleting: Timer?
     @State private var typing = false
     @State private var symbols = false
+    @State private var more = false
     @State private var shift = false
 
     var body: some View {
@@ -147,11 +169,15 @@ struct KeyboardView: View {
                     } else {
                         Spacer(minLength: 0)
                     }
-                    ForEach(Array((symbols ? Self.symbols : Self.letters).enumerated()), id: \.offset) { i, row in
+                    ForEach(Array((symbols ? more ? Self.more : Self.symbols : Self.letters).enumerated()), id: \.offset) { i, row in
                         HStack(spacing: 5) {
                             if i == 2 && !symbols {
                                 key(Image(systemName: shift ? "shift.fill" : "shift"), width: 40, function: true) { shift.toggle() }
                                     .accessibilityLabel("Shift")
+                            }
+                            if i == 2 && symbols {
+                                key(Text(more ? "123" : "#+="), width: 48, function: true) { more.toggle() }
+                                    .accessibilityLabel(more ? "Numbers" : "More symbols")
                             }
                             ForEach(row.map(String.init), id: \.self) { s in
                                 let s = shift ? s.uppercased() : s
@@ -188,7 +214,7 @@ struct KeyboardView: View {
                         .accessibilityLabel(typing ? "Show history" : "Show keyboard")
                 }
                 if !model.fullAccess || typing {
-                    key(Text(symbols ? "ABC" : "123"), width: 48, function: true) { symbols.toggle() }
+                    key(Text(symbols ? "ABC" : "123"), width: 48, function: true) { symbols.toggle(); more = false }
                 }
                 if model.globe {
                     key(Image(systemName: "globe"), width: 44, function: true) { model.nextKeyboard() }.accessibilityLabel("Next keyboard")
@@ -206,7 +232,8 @@ struct KeyboardView: View {
     }
 
     private static let letters = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-    private static let symbols = ["1234567890", "-/:;()$&@\"", ".,?!'#%*+="]
+    private static let symbols = ["1234567890", "-/:;()$&@\"", ".,?!'"]
+    private static let more = ["[]{}#%^*+=", "_\\|~<>€£¥•", ".,?!'"]
 
     private func key<L: View>(_ label: L, width: CGFloat?, function: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {

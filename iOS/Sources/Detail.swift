@@ -66,8 +66,8 @@ struct ClipDetail: View {
 
     init(clip: Clip) { item = clip }
 
-    /// The live copy, so the screen updates when Get brings the item over.
-    private var clip: Clip { model.clips.first { $0.hash == item.hash } ?? item }
+    @State private var live: Clip?
+    private var clip: Clip { live ?? item }
 
     var body: some View {
         ScrollView {
@@ -106,6 +106,8 @@ struct ClipDetail: View {
             .padding(.horizontal).padding(.bottom, 8)
         }
         .toast(model.toast)
+        // Reads the item back whenever history changes, so the screen updates when Get brings it over.
+        .onReceive(model.$clips) { _ in live = DB().clip(hash: item.hash) ?? live }
     }
 
     private var device: String { clip.origin.isEmpty ? "This iPhone" : model.devices[clip.origin] ?? "computer" }
