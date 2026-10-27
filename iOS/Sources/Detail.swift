@@ -61,8 +61,13 @@ struct ClipPreview: View {
 struct ClipDetail: View {
     @EnvironmentObject var model: Model
     @Environment(\.dismiss) private var dismiss
-    let clip: Clip
+    private let item: Clip
     @State private var confirmDelete = false
+
+    init(clip: Clip) { item = clip }
+
+    /// The live copy, so the screen updates when Get brings the item over.
+    private var clip: Clip { model.clips.first { $0.hash == item.hash } ?? item }
 
     var body: some View {
         ScrollView {
@@ -86,7 +91,7 @@ struct ClipDetail: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }
+                Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }.accessibilityLabel("Delete")
             }
         }
         .confirmationDialog("Delete this item from ClipBubble everywhere?", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -188,6 +193,12 @@ struct ZoomableImage: View {
 extension Clip {
     var names: String {
         kind == "image" ? "Image" : paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+    }
+
+    /// What VoiceOver reads for an item.
+    var spoken: String {
+        let what = kind == "text" ? String(text.prefix(300)) : kind == "image" ? "Image" : "File, \(names)"
+        return remote ? "\(what), still on another device" : what
     }
 }
 

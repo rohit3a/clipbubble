@@ -176,10 +176,17 @@ final class DB {
     }
 
     /// Only images ClipBubble stored itself are deleted; screenshots, downloads and copied files belong to the user.
+    /// Deletes only files ClipBubble made in its own folder: stored images, and on iPhone what you added or received.
+    /// Files you copied in Finder, or that landed in ~/Downloads on a computer, are yours and stay.
     private func removeFiles(_ clips: [Clip]) {
+        let own = Paths.dir.path + "/", sent = Paths.dir.appendingPathComponent("sent").path
         for c in clips {
-            guard let f = c.file, (f as NSString).deletingLastPathComponent == Paths.images.path else { continue }
-            try? FileManager.default.removeItem(atPath: f)
+            for f in [c.file].compactMap({ $0 }) + c.paths where f.hasPrefix(own) {
+                try? FileManager.default.removeItem(atPath: f)
+                // A file added on the iPhone sits alone in a folder under sent/.
+                let parent = (f as NSString).deletingLastPathComponent
+                if (parent as NSString).deletingLastPathComponent == sent { try? FileManager.default.removeItem(atPath: parent) }
+            }
         }
     }
 

@@ -61,7 +61,7 @@ final class KeyboardModel: ObservableObject {
         guard fullAccess else { return }
         opened += 1
         // Inside the ClipBubble app, the app already holds the link and this keyboard reads what it syncs.
-        viaApp = Platform.defaults.bool(forKey: "app.active")
+        viaApp = Date().timeIntervalSince1970 - Platform.defaults.double(forKey: "app.alive") < 10
         let engine = SyncEngine.shared
         engine.suspend(viaApp)
         reload()
@@ -123,23 +123,44 @@ final class KeyboardModel: ObservableObject {
 struct KeyboardView: View {
     @ObservedObject var model: KeyboardModel
     @State private var deleting: Timer?
+    @State private var typing = false
+    @State private var symbols = false
+    @State private var shift = false
 
     var body: some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(model.linked ? Color.green : Color.orange).frame(width: 7, height: 7)
-                Text(model.note ?? model.status).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+                Text(model.note ?? (model.fullAccess ? model.status : "ClipBubble")).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
             }
             .padding(.horizontal, 10).padding(.top, 6)
+            .accessibilityElement(children: .combine)
 
-            if !model.fullAccess {
-                VStack(spacing: 6) {
-                    Text("Turn on Allow Full Access").font(.headline)
-                    Text("Settings → General → Keyboard → Keyboards → ClipBubble. It lets the keyboard read your ClipBubble history and link to your computers.")
-                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            if !model.fullAccess || typing {
+                // Without Full Access there's no history to show, so it's a plain keyboard until that's turned on.
+                VStack(spacing: 8) {
+                    if !model.fullAccess {
+                        Text("Turn on Allow Full Access in Settings → General → Keyboard → Keyboards → ClipBubble to see your history here.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(2)
+                            .minimumScaleFactor(0.8).padding(.horizontal, 12).frame(maxHeight: .infinity)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                    ForEach(Array((symbols ? Self.symbols : Self.letters).enumerated()), id: \.offset) { i, row in
+                        HStack(spacing: 5) {
+                            if i == 2 && !symbols {
+                                key(Image(systemName: shift ? "shift.fill" : "shift"), width: 40, function: true) { shift.toggle() }
+                                    .accessibilityLabel("Shift")
+                            }
+                            ForEach(row.map(String.init), id: \.self) { s in
+                                let s = shift ? s.uppercased() : s
+                                key(Text(s), width: nil) { model.type(s); shift = false }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, 20).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.clips.isEmpty {
                 Text("Nothing copied yet. Copy something on your computer and it shows up here.")
                     .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -162,20 +183,30 @@ struct KeyboardView: View {
             }
 
             HStack(spacing: 6) {
+                if model.fullAccess {
+                    key(Image(systemName: typing ? "doc.on.clipboard" : "keyboard"), width: 44, function: true) { typing.toggle() }
+                        .accessibilityLabel(typing ? "Show history" : "Show keyboard")
+                }
+                if !model.fullAccess || typing {
+                    key(Text(symbols ? "ABC" : "123"), width: 48, function: true) { symbols.toggle() }
+                }
                 if model.globe {
-                    key(Image(systemName: "globe"), width: 44, function: true) { model.nextKeyboard() }
+                    key(Image(systemName: "globe"), width: 44, function: true) { model.nextKeyboard() }.accessibilityLabel("Next keyboard")
                 }
                 key(Text("space"), width: nil) { model.type(" ") }
-                key(Image(systemName: "delete.left"), width: 52, function: true) { model.backspace() }
+                key(Image(systemName: "delete.left"), width: 52, function: true) { model.backspace() }.accessibilityLabel("Delete")
                     .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                         deleting = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in Task { @MainActor in model.backspace() } }
                     })
                     .simultaneousGesture(DragGesture(minimumDistance: 0).onEnded { _ in deleting?.invalidate(); deleting = nil })
-                key(Image(systemName: "return"), width: 60, function: true) { model.type("\n") }
+                key(Image(systemName: "return"), width: 60, function: true) { model.type("\n") }.accessibilityLabel("Return")
             }
             .padding(.horizontal, 6).padding(.bottom, 6)
         }
     }
+
+    private static let letters = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
+    private static let symbols = ["1234567890", "-/:;()$&@\"", ".,?!'#%*+="]
 
     private func key<L: View>(_ label: L, width: CGFloat?, function: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -235,5 +266,8 @@ struct KeyboardChip: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: .black.opacity(0.25), radius: 0, y: 1)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(clip.kind == "text" ? String(clip.text.prefix(300)) : clip.kind == "image" ? "Image" : "File")
+        .accessibilityHint(clip.kind == "text" ? "Types it" : "Copies it to paste")
     }
 }

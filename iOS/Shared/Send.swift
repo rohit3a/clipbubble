@@ -94,14 +94,13 @@ enum Courier {
                         add: @escaping () async -> [String]) async -> String {
         let engine = SyncEngine.shared
         guard !SyncEngine.enabledHosts.isEmpty else {
-            _ = await add()
-            return "Saved. Link a computer in ClipBubble to send it there."
+            return await add().isEmpty ? "Couldn't save that." : "Saved. Link a computer in ClipBubble to send it there."
         }
         engine.start()
         status("Connecting…")
         let linked = await until(seconds: 10) { engine.statuses.values.contains { $0.ok } }
         let hashes = await add()
-        guard !hashes.isEmpty else { return "Nothing to send." }
+        guard !hashes.isEmpty else { return "Couldn't save that." }
         guard linked else {
             let why = engine.statuses.values.first { !$0.ok }?.text ?? "Offline"
             return "Saved. \(why), so it goes over next time."
@@ -130,7 +129,8 @@ enum Courier {
         }
         engine.onApplied = wasApplied
         engine.onTransfers = wasTransfers
-        if got.isEmpty { return "Sent to \(names.joined(separator: ", "))." }
+        // No answer yet doesn't mean it arrived: it's saved here and syncs again next time.
+        if got.isEmpty { return "Saved. Still waiting for \(names.joined(separator: ", ")) to confirm." }
         return "On the clipboard of \(got.sorted().joined(separator: ", "))."
     }
 

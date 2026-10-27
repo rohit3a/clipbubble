@@ -5,7 +5,12 @@ import UIKit
 /// Small copies of history images, made off the main thread and kept in memory. A full Mac screenshot decodes to
 /// about 22 MB, which stalls scrolling and can push the keyboard past its memory limit.
 enum Thumbnails {
-    private static let cache = NSCache<NSString, UIImage>()
+    /// Capped well under the keyboard's memory limit; a 540-pixel thumbnail costs about 1 MB.
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.totalCostLimit = 24 << 20
+        return c
+    }()
 
     static func cached(_ path: String, pixels: Int) -> UIImage? { cache.object(forKey: key(path, pixels)) }
 
@@ -23,7 +28,7 @@ enum Thumbnails {
             else { return nil }
             return UIImage(cgImage: cg)
         }.value
-        if let img { cache.setObject(img, forKey: key(path, pixels)) }
+        if let img, let cg = img.cgImage { cache.setObject(img, forKey: key(path, pixels), cost: cg.bytesPerRow * cg.height) }
         return img
     }
 
