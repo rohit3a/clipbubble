@@ -192,6 +192,36 @@ func linkTests() {
     db.upsert(kind: "text", text: again, file: nil, source: "Notes", hash: "t:" + sha(again))
     check(waitFor("new link applies") { (try? String(contentsOf: appliedFile, encoding: .utf8))?.contains("t:" + sha(again)) ?? false },
           "and the new link carries copies")
+
+    // A row too big for a frame stays here. Sent, it would make the far end drop the link on every reconnect.
+    let tooBig = String(repeating: "x", count: Sync.maxFrame + 1), after = "after too big \(Date().timeIntervalSince1970)"
+    db.upsert(kind: "text", text: tooBig, file: nil, source: "Notes", hash: "t:" + sha(tooBig))
+    db.upsert(kind: "text", text: after, file: nil, source: "Notes", hash: "t:" + sha(after))
+    let appliedNow = { (try? String(contentsOf: appliedFile, encoding: .utf8)) ?? "" }
+    check(waitFor("copy after a big row") { appliedNow().contains("t:" + sha(after)) }, "a row too big to sync doesn't stop the next copy")
+    check(!appliedNow().contains("t:" + sha(tooBig)) && second.isRunning, "and the link holds")
+
+    // Two names for one computer: it keeps the newest link from this device, so this end must too, or they knock each other off.
+    var pipes: [Pipe] = []
+    func named(_ alias: String) -> (HostLink, FileHandle) {
+        let incoming = Pipe(), outgoing = Pipe(), link = HostLink(alias: alias, engine: engine)
+        pipes += [incoming, outgoing]
+        let s = Session(input: incoming.fileHandleForReading, output: outgoing.fileHandleForWriting, engine: engine)
+        s.link = link
+        engine.queue.sync { engine.begin(s) }
+        return (link, incoming.fileHandleForWriting)
+    }
+    let computer = Hello(proto: Sync.proto, device: "two-names", name: "Two", os: "macos", version: "9", clock: Date().timeIntervalSince1970)
+    let links = { engine.linked.filter { $0.device == computer.device }.count }
+    let (older, olderIn) = named("-older"), (newer, newerIn) = named("-newer")
+    olderIn.write(Frame.hello(computer).encoded())
+    check(waitFor("first name") { links() == 1 && engine.queue.sync { older.state.ok } }, "one name links")
+    newerIn.write(Frame.hello(computer).encoded())
+    check(waitFor("second name") { engine.queue.sync { newer.state.ok } }, "the second name takes over")
+    check(waitFor("one link") { links() == 1 } && engine.queue.sync { older.state.ok }, "one link stays, and the first name reads as linked")
+    try? olderIn.close()
+    try? newerIn.close()
+
     try? secondIn.fileHandleForWriting.close()
     second.waitUntilExit()
     DB.changed = hook

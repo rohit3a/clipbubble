@@ -99,6 +99,7 @@ final class Model: ObservableObject {
     func remove(_ alias: String) {
         hosts.removeAll { $0 == alias }
         SyncEngine.shared.setHost(alias, on: false)
+        Addresses.forget(alias)
     }
 
     func redialAll() { hosts.forEach { SyncEngine.shared.redial($0) } }
@@ -168,6 +169,7 @@ final class Model: ObservableObject {
         Task {
             do {
                 let (alias, name) = try await Pairing.pair(url)
+                Pairing.olderLinks(than: alias).forEach(remove)
                 add(alias)
                 SyncEngine.shared.redial(alias)
                 pairing = nil
@@ -451,13 +453,24 @@ struct HostRow: View {
             Image(systemName: "laptopcomputer").font(.title3).foregroundStyle(.secondary).frame(width: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.subheadline.weight(.semibold))
-                Text(state.map { if case .live = $0 { return "Linked" }; return $0.text } ?? "Connecting…")
-                    .font(.caption).foregroundStyle(.secondary)
+                // On a timer because "retrying in 8 s" counts down with nothing else changing.
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text(state.map { if case .live = $0 { return "Linked" }; return $0.text } ?? "Connecting…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
+            if stuck { Button("Retry") { SyncEngine.shared.redial(alias) }.buttonStyle(.borderless).font(.caption) }
             Circle().fill(state?.ok == true ? Color.green : Color.orange).frame(width: 8, height: 8)
         }
         .padding(.vertical, 2)
+    }
+
+    private var stuck: Bool {
+        switch state {
+        case nil, .connecting?, .live?: return false
+        default: return true
+        }
     }
 
     private var name: String {
@@ -525,13 +538,8 @@ struct SettingsView: View {
 
                 if !model.hosts.isEmpty {
                     Section("Computers") {
-                        ForEach(model.hosts, id: \.self) { h in
-                            VStack(alignment: .leading) {
-                                Text(h)
-                                Text(model.statuses[h]?.text ?? "Connecting…").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .onDelete { $0.map { model.hosts[$0] }.forEach(model.remove) }
+                        ForEach(model.hosts, id: \.self) { h in HostRow(alias: h, state: model.statuses[h]) }
+                            .onDelete { $0.map { model.hosts[$0] }.forEach(model.remove) }
                     }
                 }
 

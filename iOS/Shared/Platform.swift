@@ -10,6 +10,10 @@ enum Platform {
     static let dataDir = (FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
         ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]).appendingPathComponent("ClipBubble")
     static let defaults = UserDefaults(suiteName: group) ?? .standard
+    /// The app is only ever linking while you're looking at it, so it never waits long.
+    static let retryCap: Double = 30
+    static let hostChanged = "This computer's identity changed. Link it again."
+    static let keyRefused = "This computer doesn't know this iPhone. Link it again."
     /// Files from other devices; open them from ClipBubble to save or share.
     static var downloads: URL { dataDir }
 

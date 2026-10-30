@@ -26,7 +26,6 @@ final class Capture {
         "de.petermaurer.TransientPasteboardType", "com.typeit4me.clipping", "Pasteboard generator type",
     ]
     /// Text bigger than this (a log dump, a database export) isn't kept: it would slow every list and search.
-    private static let maxTextBytes = 2_000_000
 
     init(onChange: @escaping () -> Void) {
         self.onChange = onChange
@@ -87,7 +86,7 @@ final class Capture {
             if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: png) }
             return ("image", "", path, "i:" + h)
         }
-        if let raw = pb.string(forType: .string), !(string?.isEmpty ?? true), raw.utf8.count <= Self.maxTextBytes {
+        if let raw = pb.string(forType: .string), !(string?.isEmpty ?? true), raw.utf8.count <= Sync.maxText {
             return ("text", raw, nil, "t:" + sha(raw))
         }
         return nil
