@@ -74,6 +74,8 @@ final class SSHTunnel: Tunnel {
     private let exited: () -> Void
 
     init(alias: String, command: String, stderr: @escaping (Data) -> Void, exited: @escaping () -> Void) throws {
+        // The pipes below outlive a dropped link for a moment, and a write to a closed one would otherwise kill the process.
+        signal(SIGPIPE, SIG_IGN)
         guard let target = SSHTarget(alias) else { throw SSHTunnelError.badAlias }
         input = toSession.fileHandleForReading
         output = fromSession.fileHandleForWriting
