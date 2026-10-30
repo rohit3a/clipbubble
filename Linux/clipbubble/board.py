@@ -57,6 +57,17 @@ def write(shell, c):
     return shell.set("x-special/gnome-copied-files", ("copy\n" + uris).encode())
 
 
+def same_picture(a, b):
+    """Whether two image files show the same pixels, however each was encoded."""
+    from gi.repository import GdkPixbuf
+    try:
+        x, y = (GdkPixbuf.Pixbuf.new_from_file(f).add_alpha(False, 0, 0, 0) for f in (a, b))
+    except Exception:
+        return False
+    return (x.get_width(), x.get_height()) == (y.get_width(), y.get_height()) \
+        and x.read_pixel_bytes().get_data() == y.read_pixel_bytes().get_data()
+
+
 def _file_paths(shell, mimes):
     for mime in ("x-special/gnome-copied-files", "text/uri-list"):
         if mime not in mimes:

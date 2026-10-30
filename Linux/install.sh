@@ -47,7 +47,8 @@ if gdbus call --session -d studio.krnl.ClipBubble.Shell -o /studio/krnl/ClipBubb
      -m studio.krnl.ClipBubble.Shell.Version >/dev/null 2>&1; then
   echo "CLIPBUBBLE_READY"
 elif pgrep -u "$(id -u)" -x gnome-shell >/dev/null 2>&1; then
-  echo "CLIPBUBBLE_NEEDS_RELOGIN"
+  version=$(gnome-shell --version 2>/dev/null | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+  if grep -q "\"$version\"" "$ext/metadata.json"; then echo "CLIPBUBBLE_NEEDS_RELOGIN"; else echo "CLIPBUBBLE_OLD_GNOME"; fi
 else
   echo "CLIPBUBBLE_HEADLESS"
 fi

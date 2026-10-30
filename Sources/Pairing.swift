@@ -6,6 +6,7 @@ import SystemConfiguration
 /// Links an iPhone without Terminal. The QR code carries this Mac's addresses and a one-time code; the phone sends its
 /// SSH key back over the local network, and the key goes into ~/.ssh/authorized_keys allowed to run only ClipBubble's relay.
 final class PairingServer {
+    private var expires = Date.distantPast
     private let code = (0..<16).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
     private let queue = DispatchQueue(label: "clipbubble.pairing")
     private var listener: NWListener?
@@ -17,6 +18,7 @@ final class PairingServer {
     func start() {
         guard let l = try? NWListener(using: .tcp, on: .any) else { return }
         listener = l
+        expires = Date().addingTimeInterval(600)
         l.newConnectionHandler = { [weak self] c in self?.serve(c) }
         l.stateUpdateHandler = { [weak self] state in
             guard case .ready = state, let self, let port = l.port?.rawValue else { return }
@@ -80,7 +82,7 @@ final class PairingServer {
     private func answer(_ line: Data, on c: NWConnection) {
         var reply: [String: Any] = ["ok": false]
         if let req = try? JSONSerialization.jsonObject(with: line) as? [String: String],
-           req["code"] == code,
+           req["code"] == code, Date() < expires,
            let key = req["key"], let name = req["name"] {
             do {
                 try AuthorizedKeys.add(key: key, name: name)

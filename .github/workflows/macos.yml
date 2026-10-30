@@ -1,0 +1,22 @@
+name: Mac
+
+on:
+  push:
+    paths: ['Sources/**', 'Tests/**', 'Linux/**', 'Windows/SyncTests/**', 'Windows/Sources/**', 'tests.sh', '.github/workflows/macos.yml']
+  pull_request:
+    paths: ['Sources/**', 'Tests/**', 'Linux/**', 'Windows/SyncTests/**', 'Windows/Sources/**', 'tests.sh', '.github/workflows/macos.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      # tests.sh runs the Swift, Linux and Windows sync suites, the last against the Mac engine.
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - run: ./tests.sh

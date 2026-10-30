@@ -77,7 +77,7 @@ class Server:
         except (OSError, ValueError):
             return False
         reply, paired = {"ok": False}, False
-        if isinstance(req, dict) and hmac.compare_digest(str(req.get("code", "")), self.code) \
+        if isinstance(req, dict) and hmac.compare_digest(str(req.get("code", "")).encode(), self.code.encode()) \
                 and isinstance(req.get("key"), str) and isinstance(req.get("name"), str):
             try:
                 authorize(req["key"], req["name"])
@@ -142,7 +142,11 @@ def firewall_hint():
             return f"If the iPhone can't connect, let it through your firewall once: sudo ufw allow 22,{PORT}/tcp"
     except OSError:
         pass
-    if subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"], capture_output=True).returncode == 0:
+    try:
+        firewalld = subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"], capture_output=True).returncode == 0
+    except OSError:
+        firewalld = False
+    if firewalld:
         return (f"If the iPhone can't connect, let it through your firewall once: sudo firewall-cmd --permanent "
                 f"--add-service=ssh --add-port={PORT}/tcp && sudo firewall-cmd --reload")
     return None

@@ -123,6 +123,10 @@ final class FolderWatcher {
     }
     static var downloadsFolder: URL? { FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first }
 
+    static func isScreenCapture(_ url: URL) -> Bool {
+        getxattr(url.path, "com.apple.metadata:kMDItemIsScreenCapture", nil, 0, 0, 0) >= 0
+    }
+
     /// Whether we can read the folder (asks macOS the first time, which may show its privacy prompt).
     static func canRead(_ url: URL?) -> Bool {
         guard let url else { return false }

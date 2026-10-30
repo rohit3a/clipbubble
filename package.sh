@@ -12,7 +12,16 @@ mkdir -p $APP/Contents/Resources/linux
 cp -R Linux/clipbubble Linux/extension Linux/install.sh Linux/clipbubble.service $APP/Contents/Resources/linux/
 find $APP/Contents/Resources/linux -name __pycache__ -prune -exec rm -rf {} +
 sed -n 's/^VERSION = "\(.*\)"/\1/p' Linux/clipbubble/engine.py > $APP/Contents/Resources/linux/VERSION
-swiftc -O -swift-version 5 Sources/*.swift -o $APP/Contents/MacOS/ClipBubble
+BIN=$APP/Contents/MacOS/ClipBubble
+if [[ -n $CLIPBUBBLE_TIMESTAMP ]]; then
+  # A release runs on Intel Macs too. Dev builds skip the second slice to stay quick.
+  swiftc -O -swift-version 5 -target arm64-apple-macos14 Sources/*.swift -o $BIN.arm64
+  swiftc -O -swift-version 5 -target x86_64-apple-macos14 Sources/*.swift -o $BIN.x86_64
+  lipo -create $BIN.arm64 $BIN.x86_64 -output $BIN
+  rm $BIN.arm64 $BIN.x86_64
+else
+  swiftc -O -swift-version 5 -target $(uname -m)-apple-macos14 Sources/*.swift -o $BIN
+fi
 ID=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
 if [[ -n $ID ]]; then
   # Notarization needs the hardened runtime and a secure timestamp; release.sh asks for the timestamp.
