@@ -180,6 +180,7 @@ static class Program
         ("an older database gains the sync columns", () =>
         {
             var path = Paths.Db;
+            foreach (var f in new[] { path, path + "-wal", path + "-shm" }) File.Delete(f);
             using (var raw = new RawDb(path))
                 raw.Exec(@"CREATE TABLE clips(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
                            file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL);
