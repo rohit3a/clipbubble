@@ -298,7 +298,7 @@ static class UI
         Link = Glyph(0xE71B), Camera = Glyph(0xE722), Download = Glyph(0xE896), Back = Glyph(0xE76B), Ok = Glyph(0xEC61),
         Warning = Glyph(0xE7BA), Off = Glyph(0xE738), Plus = Glyph(0xE710), Copy = Glyph(0xE8C8), Check = Glyph(0xE73E),
         Power = Glyph(0xE7E8), Keyboard = Glyph(0xE765), Network = Glyph(0xE968), Pause = Glyph(0xE769), Close = Glyph(0xE711),
-        Phone = Glyph(0xE8EA);
+        Phone = Glyph(0xE8EA), Hide = Glyph(0xED1A);
 
     /// Line height follows SF Pro (1.2x) rather than Segoe's taller default, so rows sit where they do on the Mac.
     public static TextBlock Label(string text, double size, Brush? color = null, FontWeight? weight = null) => new()
@@ -1590,6 +1590,11 @@ sealed class SettingsView : Grid
         shown = Folders();
         content.Children.Clear();
 
+        var bubble = Section("Bubble");
+        bubble.Children.Add(Row(UI.Hide, "Hide bubble until needed", $"Shows up when you copy something or press {app.BubbleKey.Text}.",
+            Switch(App.HideBubble, on => Save(() => { app.SetHideBubble(on); Render(); }))));
+        if (App.HideBubble) bubble.Children.Add(Row(UI.Keyboard, "Show or hide bubble", null, HotkeyBox(app.BubbleKey)));
+
         var save = Section("Save to history");
         foreach (var c in Prefs.Categories.Where(c => c.Key is not ("screenshots" or "downloads")))
             save.Children.Add(Row(c.Icon, c.Title, c.Detail, Switch(Prefs.On(c.Key), on => Save(() => model.SetPref(c.Key, on)))));
@@ -1611,7 +1616,7 @@ sealed class SettingsView : Grid
             Prefs.On("downloads") ? shown.DownloadsOk : null, "downloads", null));
         folders.Children.Add(Row(UI.Keyboard, "Auto-paste", "Enter pastes into the app you were in. Apps running as administrator just get a copy.",
             Switch(Prefs.Get("autoPaste", true), on => Save(() => Prefs.Set("autoPaste", on)))));
-        folders.Children.Add(Row(UI.Keyboard, "Open ClipBubble", null, HotkeyBox()));
+        folders.Children.Add(Row(UI.Keyboard, "Open ClipBubble", null, HotkeyBox(app.PanelKey)));
 
         RenderSync();
 
@@ -1950,35 +1955,35 @@ sealed class SettingsView : Grid
     public const string Recording = "recording";
 
     /// Click, then press the new shortcut. Esc cancels.
-    FrameworkElement HotkeyBox()
+    FrameworkElement HotkeyBox(App.GlobalKey hotkey)
     {
-        var label = UI.Label(app.HotkeyLabel, 11, UI.Primary, FontWeights.Medium);
+        var label = UI.Label(hotkey.Label, 11, UI.Primary, FontWeights.Medium);
         var box = new Border { CornerRadius = new CornerRadius(5), Background = UI.White(0.09), Padding = new Thickness(8, 2, 8, 3), Child = label, Focusable = true, Cursor = Cursors.Arrow, FocusVisualStyle = null };
         var recording = false;
         void Stop(string text)
         {
             recording = false;
             box.Tag = null;
-            app.PauseHotkey(false);
+            app.PauseHotkeys(false);
             label.Text = text;
             Keyboard.Focus(this);   // off the box, so Esc goes back to the list again
         }
-        // The current shortcut is switched off while recording, so pressing it again records it instead of closing the panel.
-        box.MouseLeftButtonUp += (_, _) => { recording = true; box.Tag = Recording; app.PauseHotkey(true); label.Text = "Press keys…"; box.Focus(); };
-        box.LostKeyboardFocus += (_, _) => { if (recording) Stop(app.HotkeyLabel); };
-        box.Unloaded += (_, _) => { if (recording) Stop(app.HotkeyLabel); };
+        // The shortcuts are switched off while recording, so pressing one records it instead of closing the panel.
+        box.MouseLeftButtonUp += (_, _) => { recording = true; box.Tag = Recording; app.PauseHotkeys(true); label.Text = "Press keys…"; box.Focus(); };
+        box.LostKeyboardFocus += (_, _) => { if (recording) Stop(hotkey.Label); };
+        box.Unloaded += (_, _) => { if (recording) Stop(hotkey.Label); };
         box.PreviewKeyDown += (_, e) =>
         {
             if (!recording) return;
             e.Handled = true;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
-            if (key == Key.Escape) { Stop(app.HotkeyLabel); return; }
+            if (key == Key.Escape) { Stop(hotkey.Label); return; }
             if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin) return;
             var mods = Keyboard.Modifiers;
             if (mods == ModifierKeys.None || mods == ModifierKeys.Shift) return;   // a bare key would swallow typing everywhere
             var taken = false;
-            Save(() => taken = !app.SetHotkey(mods, key));
-            Stop(taken ? "Taken, try another" : app.HotkeyLabel);
+            Save(() => taken = !app.SetHotkey(hotkey, mods, key));
+            Stop(taken ? "Taken, try another" : hotkey.Label);
         };
         return box;
     }
@@ -2017,7 +2022,7 @@ sealed class SettingsView : Grid
 
 sealed class App : Application
 {
-    const double IdleAlpha = 0.4, Margin = 10;
+    const double IdleAlpha = 0.4, Margin = 10, HideAfter = 3;
     readonly Model model = new();
     /// Tests make an App only to host Settings. WPF still starts it on the first dispatcher pump; this keeps the bubble, capture and sync from starting.
     public bool Headless { get; init; }
@@ -2027,9 +2032,10 @@ sealed class App : Application
     FolderWatcher? screenshots, downloads;
     HwndSource messages = null!;
     IntPtr pasteTarget;
-    DispatcherTimer? pulseWork, peekWork;
-    bool dragging, pressed, bubbleHover, peekHover, pulse, modal;
-    (ModifierKeys Mods, Key Key) hotkey = (ModifierKeys.Control | ModifierKeys.Shift, Key.Space);
+    DispatcherTimer? pulseWork, peekWork, hideWork;
+    bool dragging, pressed, bubbleHover, peekHover, pulse, modal, hiding;
+    public readonly GlobalKey PanelKey = new(1, "hotkey", ModifierKeys.Control | ModifierKeys.Shift, Key.Space);
+    public readonly GlobalKey BubbleKey = new(2, "bubbleHotkey", ModifierKeys.Control | ModifierKeys.Alt, Key.B);
 
     public Window PanelWindow => panel;
 
@@ -2052,22 +2058,23 @@ sealed class App : Application
         model.Refresh();
 
         face = new BubbleView(model);
-        bubble = new FloatingWindow(64, 64, keyable: false) { Content = face, Opacity = IdleAlpha };
+        bubble = new FloatingWindow(64, 64, keyable: false) { Content = face, Opacity = HideBubble ? 0 : IdleAlpha };
         face.HitArea.MouseEnter += (_, _) => SetBubbleHover(true);
         face.HitArea.MouseLeave += (_, _) => SetBubbleHover(false);
         face.HitArea.MouseLeftButtonDown += BubbleDown;
         face.HitArea.MouseMove += BubbleDrag;
         face.HitArea.MouseLeftButtonUp += BubbleUp;
         face.Pressed = Toggle;
-        bubble.Show();
+        bubble.Show();   // even when hidden: placing it needs its handle and scale
         Snap(animated: false);
+        if (HideBubble) bubble.Hide();
 
         var panelView = new PanelView(model, () => new SettingsView(model, this));
         panel = new FloatingWindow(420 + 2 * Glass.Shadow, 470 + 2 * Glass.Shadow, keyable: true) { Content = Glass.Wrap(panelView, 16) };
         panel.Deactivated += (_, _) => { if (!modal) HidePanel(); };
         panel.PreviewKeyDown += HandleKey;
 
-        var peekGlass = Glass.Wrap(new PeekView(model, () => HotkeyText), 14);
+        var peekGlass = Glass.Wrap(new PeekView(model, () => PanelKey.Text), 14);
         peek = new FloatingWindow(300 + 2 * Glass.Shadow, 100, keyable: false) { Content = peekGlass, SizeToContent = SizeToContent.Height };
         peekGlass.MouseEnter += (_, _) => { peekHover = true; UpdatePeek(); };
         peekGlass.MouseLeave += (_, _) => { peekHover = false; UpdatePeek(); };
@@ -2076,7 +2083,7 @@ sealed class App : Application
         model.PrefsChanged = () => { SyncScreenshots(); SyncDownloads(); ImportFolders(); };
         model.ShowError = (title, reason) => Modal(() => Alert.Show(panel, title, reason, "OK", cancel: null));
 
-        capture = new Capture(model.Writer, copied => { if (copied) Captured(); else RefreshLists(); });
+        capture = new Capture(model.Writer, copied => { if (copied) { ShowBubble(); Captured(); } else RefreshLists(); });
         StartSync();
         SyncScreenshots();
         SyncDownloads();
@@ -2086,8 +2093,7 @@ sealed class App : Application
 
         messages = new HwndSource(new HwndSourceParameters("ClipBubble messages") { ParentWindow = new IntPtr(-3) });
         messages.AddHook(Messages);
-        hotkey = ParseHotkey(Prefs.Get("hotkey", "Ctrl+Shift+Space")) ?? (ModifierKeys.Control | ModifierKeys.Shift, Key.Space);
-        RegisterHotkey();
+        RegisterHotkeys();
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(new Action(() => Snap(animated: false)));
         // Mascot changes from the MCP server (another process) and second launches land here.
         Listen(Mascots.ChangedEvent, () => { model.LoadMascots(); Captured(pulseOnly: true); });
@@ -2118,7 +2124,9 @@ sealed class App : Application
     void ApplySynced(Clip c)
     {
         Recorder.Expect(Recorder.CaptureHash(c), null);
-        if (Board.Write(c) is { } why) SyncLog.Write($"couldn't put {c.Hash.Substring(0, Math.Min(10, c.Hash.Length))} on the clipboard: {why}");
+        if (Board.Write(c) is { } why) { SyncLog.Write($"couldn't put {c.Hash.Substring(0, Math.Min(10, c.Hash.Length))} on the clipboard: {why}"); return; }
+        ShowBubble();
+        Captured(pulseOnly: true);
     }
 
     void Listen(string name, Action act)
@@ -2143,17 +2151,29 @@ sealed class App : Application
 
     IntPtr Messages(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg == 0x0312) Toggle();   // WM_HOTKEY
+        if (msg == 0x0312) { if (wParam == new IntPtr(BubbleKey.Id)) ToggleBubble(); else Toggle(); }   // WM_HOTKEY
         if (msg == 0x001A && wParam == new IntPtr(0x2F)) Snap(animated: false);   // SPI_SETWORKAREA: the taskbar moved
         return IntPtr.Zero;
     }
 
     // MARK: Hotkey
 
-    public string HotkeyText => string.Join("+", new[] {
-        hotkey.Mods.HasFlag(ModifierKeys.Control) ? "Ctrl" : null, hotkey.Mods.HasFlag(ModifierKeys.Alt) ? "Alt" : null,
-        hotkey.Mods.HasFlag(ModifierKeys.Shift) ? "Shift" : null, hotkey.Mods.HasFlag(ModifierKeys.Windows) ? "Win" : null,
-        hotkey.Key == Key.Space ? "Space" : new KeyConverter().ConvertToString(hotkey.Key) }.Where(s => s != null));
+    /// A global shortcut: what it is, the pref that keeps it, and whether Windows gave it to us.
+    public sealed class GlobalKey(int id, string pref, ModifierKeys mods, Key key)
+    {
+        public readonly int Id = id;
+        public readonly string Pref = pref;
+        public (ModifierKeys Mods, Key Key) Now = (Prefs.Get<string?>(pref, null) is { } saved ? ParseHotkey(saved) : null) ?? (mods, key);
+        /// Another app may already own it.
+        public bool Works = true;
+
+        public string Text => string.Join("+", new[] {
+            Now.Mods.HasFlag(ModifierKeys.Control) ? "Ctrl" : null, Now.Mods.HasFlag(ModifierKeys.Alt) ? "Alt" : null,
+            Now.Mods.HasFlag(ModifierKeys.Shift) ? "Shift" : null, Now.Mods.HasFlag(ModifierKeys.Windows) ? "Win" : null,
+            Now.Key == Key.Space ? "Space" : new KeyConverter().ConvertToString(Now.Key) }.Where(s => s != null));
+
+        public string Label => Works ? Text : Text + " (in use by another app)";
+    }
 
     static (ModifierKeys, Key)? ParseHotkey(string text)
     {
@@ -2173,43 +2193,60 @@ sealed class App : Application
         return key is { } k && mods != ModifierKeys.None ? (mods, k) : null;
     }
 
-    /// Whether Windows gave us the shortcut; another app may already own it.
-    bool hotkeyWorks;
-
-    public string HotkeyLabel => hotkeyWorks ? HotkeyText : HotkeyText + " (in use by another app)";
-
-    public void PauseHotkey(bool paused)
+    /// Both are off while one is being recorded, so pressing either reaches the recorder instead of acting.
+    public void PauseHotkeys(bool paused)
     {
-        if (paused) Win.UnregisterHotKey(messages.Handle, 1);
-        else RegisterHotkey();
+        if (!paused) { RegisterHotkeys(); return; }
+        Win.UnregisterHotKey(messages.Handle, PanelKey.Id);
+        Win.UnregisterHotKey(messages.Handle, BubbleKey.Id);
     }
 
-    bool RegisterHotkey()
+    /// The panel's shortcut always, the bubble's only while Hide bubble until needed is on.
+    void RegisterHotkeys()
     {
-        Win.UnregisterHotKey(messages.Handle, 1);
+        RegisterHotkey(PanelKey);
+        if (HideBubble) RegisterHotkey(BubbleKey);
+        else Win.UnregisterHotKey(messages.Handle, BubbleKey.Id);
+    }
+
+    bool RegisterHotkey(GlobalKey k)
+    {
+        Win.UnregisterHotKey(messages.Handle, k.Id);
         uint mods = 0x4000;   // MOD_NOREPEAT
-        if (hotkey.Mods.HasFlag(ModifierKeys.Alt)) mods |= 0x1;
-        if (hotkey.Mods.HasFlag(ModifierKeys.Control)) mods |= 0x2;
-        if (hotkey.Mods.HasFlag(ModifierKeys.Shift)) mods |= 0x4;
-        if (hotkey.Mods.HasFlag(ModifierKeys.Windows)) mods |= 0x8;
-        return hotkeyWorks = Win.RegisterHotKey(messages.Handle, 1, mods, (uint)KeyInterop.VirtualKeyFromKey(hotkey.Key));
+        if (k.Now.Mods.HasFlag(ModifierKeys.Alt)) mods |= 0x1;
+        if (k.Now.Mods.HasFlag(ModifierKeys.Control)) mods |= 0x2;
+        if (k.Now.Mods.HasFlag(ModifierKeys.Shift)) mods |= 0x4;
+        if (k.Now.Mods.HasFlag(ModifierKeys.Windows)) mods |= 0x8;
+        return k.Works = Win.RegisterHotKey(messages.Handle, k.Id, mods, (uint)KeyInterop.VirtualKeyFromKey(k.Now.Key));
     }
 
-    /// Switches the global shortcut; keeps the old one if another app already owns the new one.
-    public bool SetHotkey(ModifierKeys mods, Key key)
+    /// Switches a global shortcut; keeps the old one if the other shortcut or another app already owns the new one.
+    public bool SetHotkey(GlobalKey k, ModifierKeys mods, Key key)
     {
-        var old = hotkey;
-        hotkey = (mods, key);
-        if (!RegisterHotkey())
+        if ((k == PanelKey ? BubbleKey : PanelKey).Now == (mods, key)) return false;
+        var old = k.Now;
+        k.Now = (mods, key);
+        if (!RegisterHotkey(k))
         {
-            hotkey = old;
-            RegisterHotkey();
+            k.Now = old;
+            RegisterHotkey(k);
             return false;
         }
-        try { Prefs.Set("hotkey", HotkeyText); }
-        catch { hotkey = old; RegisterHotkey(); throw; }   // a shortcut that's gone after a restart isn't really set
+        try { Prefs.Set(k.Pref, k.Text); }
+        catch { k.Now = old; RegisterHotkey(k); throw; }   // a shortcut that's gone after a restart isn't really set
         model.ReloadRecent();
         return true;
+    }
+
+    public static bool HideBubble => Prefs.Get("hideBubble", false);
+
+    public void SetHideBubble(bool on)
+    {
+        Prefs.Set("hideBubble", on);
+        if (Headless) return;
+        RegisterHotkeys();
+        if (!on) ShowBubble();
+        RestBubble();
     }
 
     public static bool OpenAtLogin
@@ -2334,11 +2371,11 @@ sealed class App : Application
     // MARK: Corner magnet
 
     /// Moves the bubble to the nearest screen corner (or the saved one when not dragging), with a little overshoot.
-    void Snap(bool animated)
+    void Snap(bool animated, Win.POINT? around = null)
     {
         var f = Win.Frame(bubble);
-        var center = new Win.POINT { X = (f.Left + f.Right) / 2, Y = (f.Top + f.Bottom) / 2 };
-        if (!animated && f.Left < -5000) center = new Win.POINT();   // first placement: the primary screen
+        var center = around ?? new Win.POINT { X = (f.Left + f.Right) / 2, Y = (f.Top + f.Bottom) / 2 };
+        if (!animated && around == null && f.Left < -5000) center = new Win.POINT();   // first placement: the primary screen
         var area = Win.WorkArea(center);
         var corner = Prefs.Get("corner", "br");
         if (animated)
@@ -2471,9 +2508,60 @@ sealed class App : Application
         if (panel.IsVisible) model.Reload();
     }
 
+    bool BubbleNeeded => panel.IsVisible || peek.IsVisible || bubbleHover || pulse || dragging || pressed;
+
+    /// Nothing needs the bubble now: dim it and, in Hide bubble until needed, start the countdown.
     void RestBubble()
     {
-        if (!panel.IsVisible && !peek.IsVisible && !bubbleHover && !pulse) SetAlpha(IdleAlpha);
+        hideWork?.Stop();
+        if (BubbleNeeded || !bubble.IsVisible || hiding) return;
+        SetAlpha(IdleAlpha);
+        if (!HideBubble) return;
+        hideWork = new DispatcherTimer { Interval = TimeSpan.FromSeconds(HideAfter) };
+        hideWork.Tick += (_, _) => { hideWork.Stop(); FadeBubble(); };
+        hideWork.Start();
+    }
+
+    void FadeBubble()
+    {
+        if (!HideBubble || BubbleNeeded || !bubble.IsVisible) return;
+        hiding = true;
+        SetAlpha(0);
+        After(0.25, () =>
+        {
+            if (!hiding) return;   // a reveal got there first
+            hiding = false;
+            if (!BubbleNeeded) bubble.Hide();
+        });
+    }
+
+    /// Back on screen but still see-through: whoever calls this sets how opaque. Hidden, it has no position to
+    /// jump from, so it comes back on the screen with the pointer.
+    void ShowBubble()
+    {
+        hideWork?.Stop();
+        hiding = false;
+        if (bubble.IsVisible) return;
+        UI.Fade(bubble, 0, 0, from: 0);
+        bubble.Show();
+        // Twice: moving to a screen with another scale resizes the window, and the corner depends on that size.
+        Snap(animated: false, Win.Cursor());
+        Snap(animated: false, Win.Cursor());
+    }
+
+    /// The bubble's own shortcut. While it's showing, everything goes at once.
+    void ToggleBubble()
+    {
+        if (dragging || pressed) return;
+        if (!bubble.IsVisible || hiding) { ShowBubble(); Captured(pulseOnly: true); return; }
+        HidePanel();
+        HidePeek();
+        SetBubbleHover(false);
+        pulseWork?.Stop();
+        pulse = false;
+        RefreshMood();
+        hideWork?.Stop();
+        FadeBubble();
     }
 
     // MARK: Panel
@@ -2483,6 +2571,7 @@ sealed class App : Application
     /// Opens the panel anchored to the bubble's corner, growing toward the screen center.
     void ShowPanel()
     {
+        ShowBubble();
         HidePeek();
         var front = Win.GetForegroundWindow();
         if (front != Win.Handle(panel)) pasteTarget = front;

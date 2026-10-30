@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 /// Two displays past the right edge of every real one: the windows are real, and a run never shows on screen.
 private let stage: [Display] = {
@@ -27,6 +28,11 @@ private func until(_ seconds: Double = 8, _ cond: () -> Bool) -> Bool {
     return cond()
 }
 
+private func key(_ code: Int, _ chars: String, _ mods: NSEvent.ModifierFlags) -> NSEvent {
+    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil,
+                     characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: UInt16(code))!
+}
+
 /// The app with real windows and a real Capture, on displays and a clipboard of their own: these tests never touch the real ones.
 private final class Rig {
     let d = AppDelegate()
@@ -34,6 +40,7 @@ private final class Rig {
     let bubble: NSWindow, panel: NSWindow
     let view: BubbleView
     let windows: [NSWindow]
+    var pointer = NSPoint(x: stage[0].frame.midX, y: stage[0].frame.midY)
     var changes = 0
     private var capture: Capture?
 
@@ -45,6 +52,7 @@ private final class Rig {
         bubble = windows.first { $0.contentView is BubbleView }!
         panel = windows.first { $0.frame.width == 420 }!
         view = bubble.contentView as! BubbleView
+        d.pointer = { [unowned self] in pointer }
         d.putOnClipboard = { [board] c in
             board.clearContents()
             switch c.kind {
@@ -61,6 +69,7 @@ private final class Rig {
 
     var model: Model { d.model }
     var db: DB { d.model.db }
+    var opaque: Bool { bubble.isVisible && bubble.alphaValue > 0.9 }
 
     func put(_ text: String, marked type: String? = nil) {
         board.clearContents()
@@ -82,13 +91,248 @@ private final class Rig {
     func close() { capture = nil; board.releaseGlobally(); windows.forEach { $0.orderOut(nil) } }
 }
 
+func shortcutTests() {
+    let bubble = Shortcut(key(kVK_ANSI_B, "b", [.control, .option]))
+    check(bubble == .bubble && bubble?.label == "⌃⌥B", "control-option-B records as the bubble shortcut")
+    check(Shortcut(key(kVK_ANSI_K, "k", [.command, .shift]))?.label == "⇧⌘K", "command-shift-K records with its label")
+    check(Shortcut(key(kVK_ANSI_C, "c", [.command])) == nil, "command-C alone would break copying")
+    check(Shortcut(key(kVK_ANSI_B, "b", [.option, .shift])) == nil, "option-shift-B types a character")
+    check(Shortcut(key(kVK_Tab, "\t", [.control, .option])) == nil, "a key with no label can't be a shortcut")
+
+    UserDefaults.standard.removeObject(forKey: "bubbleHotkey")
+    check(Shortcut.saved() == .bubble, "control-option-B is the default")
+    Shortcut(key(kVK_ANSI_K, "k", [.command, .shift]))?.save()
+    check(Shortcut.saved().label == "⇧⌘K", "a recorded shortcut survives a restart")
+    UserDefaults.standard.set(Data("junk".utf8), forKey: "bubbleHotkey")
+    check(Shortcut.saved() == .bubble, "an unreadable one falls back to the default")
+    UserDefaults.standard.removeObject(forKey: "bubbleHotkey")
+}
+
 func bubbleTests() {
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.accessory)
+    let keys = ["hideBubble", "bubbleHotkey", "corner", "cornerDisplay"]
+    keys.forEach(UserDefaults.standard.removeObject)
+    defer { keys.forEach(UserDefaults.standard.removeObject) }
+    AppDelegate.hideAfter = 0.3
+
     let r = Rig()
     defer { r.close() }
+    let bubble = r.bubble
+    r.db.deleteAll()
+
+    // Off for existing users: nothing about the bubble changes.
+    check(!r.model.hideBubble, "hide is off by default")
+    check(bubble.isVisible, "the bubble shows at launch")
+    r.copy("first")
+    r.settle()
+    check(bubble.isVisible, "and stays after a copy")
+
+    // On: it goes, and that survives a restart.
+    r.model.hideBubble = true
+    check(until { !bubble.isVisible }, "switching it on hides the bubble once it's idle")
+    let restarted = Rig()
+    check(restarted.model.hideBubble, "the setting survives a restart")
+    check(!restarted.bubble.isVisible, "and the bubble starts hidden")
+    restarted.close()
+
+    // A new copy brings it back, and it goes again.
+    r.model.unseen = 0
+    r.copy("second")
+    check(until { r.opaque }, "a new copy shows the bubble")
+    check(r.model.unseen == 1, "and counts on the badge")
+    check(until { !bubble.isVisible }, "it hides again after the idle time")
+
+    // These aren't something new.
+    r.put("second")
+    r.settle()
+    check(!bubble.isVisible, "the same copy again doesn't show it")
+    r.put("hunter2", marked: "org.nspasteboard.ConcealedType")
+    r.settle()
+    check(!bubble.isVisible, "a password-manager copy doesn't show it")
+    Prefs.set("text", false)
+    r.put("switched off")
+    r.settle()
+    Prefs.set("text", true)
+    check(!bubble.isVisible, "a copy Settings says not to save doesn't show it")
+    r.d.clipboardChanged(copied: false)
+    pump(0.1)
+    check(!bubble.isVisible, "undoing a paste-through doesn't show it")
+    r.model.unseen = 0
+    r.d.transfersChanged(["t:x": Transfer(done: 0, total: 1, peer: "Peer", sending: true)])
+    r.d.transfersChanged([:])
+    check(r.model.unseen == 0 && !bubble.isVisible, "a transfer finishing isn't a new item")
+
+    // The shortcut.
+    r.d.toggleBubble()
+    check(until { r.opaque }, "the shortcut shows it")
+    r.d.toggleBubble()
+    check(until(1.3) { !bubble.isVisible }, "and hides it at once")
+    r.d.toggleBubble()
+    check(until { r.opaque }, "shown again")
+    r.d.toggleBubble()
+    pump(0.1)
+    r.d.toggleBubble()
+    check(until(1) { r.opaque }, "pressed during the fade, it shows again")
+    pump(0.4)
+    check(bubble.isVisible, "and the old fade doesn't finish the job")
+    check(until { !bubble.isVisible }, "then it hides by itself")
+
+    // A copy from another device, as the engine hands it over.
+    r.d.connectSync()
+    SyncEngine.shared.apply(r.row("first"))
+    check(until { r.opaque }, "a copy from another device shows it, solid")
+    check(r.board.string(forType: .string) == "first", "with the copy on the clipboard")
+    check(until { !bubble.isVisible }, "and it hides again")
+    let write = r.d.putOnClipboard
+    r.d.putOnClipboard = { _ in nil }
+    SyncEngine.shared.apply(r.row("first"))
+    r.settle()
+    r.d.putOnClipboard = write
+    check(!bubble.isVisible, "one that couldn't reach the clipboard doesn't show it")
+
+    // And from a real linked device: history stays quiet, a fresh copy doesn't.
+    let live = "copied on the other device"
+    let peerHome = testHome.appendingPathComponent("bubble-peer")
+    try? FileManager.default.createDirectory(at: peerHome, withIntermediateDirectories: true)
+    let peer = linkPeer(home: peerHome, ["SEED_TEXT": "older on the other device", "LIVE_TEXT": live])
+    check(until { r.history.contains("older on the other device") }, "history arrives from a linked device")
+    check(!bubble.isVisible, "and doesn't show it")
+    check(until { r.opaque }, "a fresh copy there does")
+    check(r.board.string(forType: .string) == live, "and it's on this clipboard, got \(r.board.string(forType: .string) ?? "nothing")")
+    check(until { !bubble.isVisible }, "then it hides again")
+    unlinkPeer(peer)
+
+    // Whatever's in use keeps it.
+    r.d.reveal()
+    r.view.onHover(true)
+    pump(2)
+    check(bubble.isVisible, "hovering keeps it")
+    r.view.onHover(false)
+    check(until { !bubble.isVisible }, "it goes once the pointer leaves")
+
+    r.d.reveal()
+    r.view.onPress(true)
+    pump(2)
+    check(bubble.isVisible, "a press keeps it, even on the rim, where there's no hover")
+    r.view.onPress(false)
+    r.view.onClick()
+    check(until { r.panel.isVisible }, "a click still opens the panel")
+    r.d.toggle()
+    check(until { !bubble.isVisible }, "and closing it starts the countdown")
+
+    r.d.reveal()
+    r.view.onDragStart()
+    bubble.setFrameOrigin(NSPoint(x: stage[1].frame.maxX - 20, y: stage[1].frame.midY + 100))   // its center is past the edge
+    pump(2)
+    check(bubble.isVisible, "dragging keeps it")
+    r.view.onDragEnd()
+    check(until { !bubble.isVisible }, "and it goes after the drop")
+    check(UserDefaults.standard.object(forKey: "cornerDisplay") as? Int == stage[1].id && UserDefaults.standard.string(forKey: "corner") == "tr",
+          "its display is saved with its corner")
+    let moved = Rig()
+    check(moved.bubble.frame.maxX == stage[1].visible.maxX - 10 && moved.bubble.frame.maxY == stage[1].visible.maxY - 10,
+          "after a restart it's back in that corner of that display")
+    moved.close()
+
+    // Hidden, it has no place to jump from, so it comes back where the pointer is.
+    r.d.reveal()
+    check(stage[0].visible.contains(bubble.frame), "shown again on the display with the pointer")
+    check(until { !bubble.isVisible }, "gone")
+    r.pointer = NSPoint(x: stage[1].frame.midX, y: stage[1].frame.midY)
+    r.d.reveal()
+    check(stage[1].visible.contains(bubble.frame), "and it follows the pointer")
+    check(until { !bubble.isVisible }, "gone")
+    r.pointer = NSPoint(x: stage[0].frame.midX, y: stage[0].frame.midY)
+
+    // The panel brings it back from any route.
+    r.d.toggle()
+    check(r.opaque && r.panel.isVisible, "opening the panel shows it")
+    pump(1)
+    check(bubble.isVisible, "and it stays while the panel is open")
+    r.d.toggle()
+    r.d.toggle()
+    pump(0.1)
+    r.d.toggle()
+    check(until { !bubble.isVisible }, "gone after the panel closes")
+    r.d.reveal()
+    pump(1.45)
+    let panelDuringFade = until(1) { bubble.alphaValue < 0.35 }
+    r.d.toggle()
+    pump(0.5)
+    check(panelDuringFade && r.opaque, "the panel opening during the fade leaves it solid")
+    r.d.toggle()
+    check(until { !bubble.isVisible }, "gone again")
+
+    // Closing the panel ends recording, or both shortcuts stay off.
+    r.d.toggle()
+    r.model.recordingShortcut = true
+    r.d.toggle()
+    check(!r.model.recordingShortcut, "closing the panel ends recording")
+
+    // Off again.
+    r.model.hideBubble = false
+    check(until { bubble.isVisible && abs(bubble.alphaValue - 0.4) < 0.05 }, "switching it off brings the bubble back, dimmed")
+    r.settle()
+    check(bubble.isVisible, "and it stays")
+
+    placementTests()
+    screenshotTests(r)
     pickTests(r)
     check(!strayed, "no window reached a real display, and the app never took focus")
+}
+
+/// Where the bubble starts: nothing here can show it on a real display, so these run with two.
+private func placementTests() {
+    func launched() -> NSRect {
+        let r = Rig()
+        defer { r.close() }
+        return r.bubble.frame
+    }
+    UserDefaults.standard.set("tl", forKey: "corner")
+    UserDefaults.standard.set(stage[1].id, forKey: "cornerDisplay")
+    let saved = launched()
+    check(saved.minX == stage[1].visible.minX + 10 && saved.maxY == stage[1].visible.maxY - 10, "the bubble starts in its saved corner of its saved display")
+    UserDefaults.standard.set(999, forKey: "cornerDisplay")
+    check(stage[0].visible.contains(launched()), "a display that's gone falls back to the first")
+    UserDefaults.standard.removeObject(forKey: "cornerDisplay")
+    check(stage[0].visible.contains(launched()), "and so does having none saved, as for everyone upgrading")
+    UserDefaults.standard.removeObject(forKey: "corner")
+}
+
+/// A new screenshot always counts once, whichever way the two switches are set.
+private func screenshotTests(_ r: Rig) {
+    let bubble = r.bubble
+    func take(_ name: String) -> (news: Int, hops: Int, copied: Bool) {
+        let url = testHome.appendingPathComponent(name)
+        FileManager.default.createFile(atPath: url.path, contents: Data(name.utf8))
+        let hops = r.model.pulseTicks
+        r.model.unseen = 0
+        r.d.screenshotAdded(url, at: Date())
+        r.settle()
+        let copied = r.board.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] == [url]
+        return (r.model.unseen, r.model.pulseTicks - hops, copied)
+    }
+    r.model.hideBubble = true
+    check(until { !bubble.isVisible }, "hidden for the screenshots")
+
+    Prefs.set("files", false)
+    let notSaved = take("copied but not saved.png")
+    Prefs.set("files", true)
+    check(notSaved == (1, 1, true), "with Copied files off, a screenshot still hops and counts once, got \(notSaved)")
+    check(!bubble.isVisible, "but a copy Settings says not to save doesn't show it")
+
+    UserDefaults.standard.set(false, forKey: "copyScreenshots")
+    let notCopied = take("not copied.png")
+    UserDefaults.standard.set(true, forKey: "copyScreenshots")
+    check(notCopied == (1, 1, false), "with Also copy off, it hops, counts once and leaves the clipboard alone, got \(notCopied)")
+    check(!bubble.isVisible, "and a screenshot that isn't copied doesn't show it")
+
+    let both = take("both on.png")
+    check(both == (1, 1, true), "with both on, capture announces it, once, got \(both)")
+    check(until { !bubble.isVisible }, "gone again")
+    r.model.hideBubble = false
+    check(until { bubble.isVisible }, "back for the rest")
 }
 
 private func pickTests(_ r: Rig) {

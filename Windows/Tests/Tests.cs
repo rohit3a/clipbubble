@@ -625,13 +625,40 @@ static class Program
             Check(detail?.StartsWith("Another app is using") == true, "a locked database is put in plain words: " + detail);
         }),
 
+        ("Settings starts with Hide bubble until needed: off, saved, and with its shortcut only while on", () =>
+        {
+            var settings = new SettingsView(new Model(), TestApp.Value);
+            List<string> Words() => Descendants(settings).OfType<System.Windows.Controls.TextBlock>().Select(t => t.Text).ToList();
+            Check(!App.HideBubble, "off by default");
+            Check(Words().IndexOf("Hide bubble until needed") is >= 0 and var at && at < Words().IndexOf("Copied text"), "first in Settings");
+            Check(!Words().Contains("Show or hide bubble"), "no shortcut row while it's off");
+            Click(Switches(settings).First());
+            Check(App.HideBubble, "switched on");
+            Prefs.Reload();
+            Check(App.HideBubble, "still on when read back from disk, as after a restart");
+            Check(Words().Contains("Show or hide bubble") && Words().Contains("Ctrl+Alt+B"), "the shortcut row appears");
+            Click(Switches(settings).First());
+            Check(!App.HideBubble, "switched off");
+        }),
+
+        ("the bubble's shortcut defaults to Ctrl+Alt+B and comes back as saved", () =>
+        {
+            App.GlobalKey Key() => new(2, "bubbleHotkey", System.Windows.Input.ModifierKeys.Control | System.Windows.Input.ModifierKeys.Alt, System.Windows.Input.Key.B);
+            Check(Key().Text == "Ctrl+Alt+B", Key().Text);
+            Prefs.Set("bubbleHotkey", "Ctrl+Shift+K");
+            Check(Key().Text == "Ctrl+Shift+K", Key().Text);
+            Prefs.Set("bubbleHotkey", "nonsense");
+            Check(Key().Text == "Ctrl+Alt+B", "an unreadable one falls back: " + Key().Text);
+            Prefs.Set("bubbleHotkey", null);
+        }),
+
         ("a setting that can't be saved stays as it was and says why", () =>
         {
             var model = new Model();
             string? error = null;
             model.ShowError = (title, _) => error = title;
             var settings = new SettingsView(model, TestApp.Value);
-            var textSwitch = Descendants(settings).OfType<System.Windows.Controls.Border>().First(b => b.Width == 26 && b.Height == 15);
+            var textSwitch = Switches(settings).ElementAt(1);   // after Hide bubble until needed
             using (new FileStream(Path.Combine(Paths.Dir, "prefs.json"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 Click(textSwitch);
             Check(error == "Couldn't save that setting", "said why: " + error);
@@ -1237,6 +1264,9 @@ static class Program
 
     static IEnumerable<DependencyObject> Descendants(DependencyObject root) =>
         LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>().SelectMany(c => new[] { c }.Concat(Descendants(c)));
+
+    static IEnumerable<System.Windows.Controls.Border> Switches(DependencyObject root) =>
+        Descendants(root).OfType<System.Windows.Controls.Border>().Where(b => b.Width == 26 && b.Height == 15);
 
     static void Click(UIElement e) =>
         e.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0, System.Windows.Input.MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });

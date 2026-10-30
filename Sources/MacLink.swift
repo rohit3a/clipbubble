@@ -133,7 +133,8 @@ enum PeerRelay {
         if fd < 0 {
             let open = Process()
             open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            open.arguments = ["-gj", Bundle.main.bundlePath]
+            // Handing it a URL, which it ignores, because `open` on the app alone reopens a running one, and that shows the panel.
+            open.arguments = ["-gj", "-a", Bundle.main.bundlePath, "clipbubble:peer"]
             try? open.run()
             for _ in 0..<40 where fd < 0 {
                 usleep(250_000)
