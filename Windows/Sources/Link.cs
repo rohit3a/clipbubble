@@ -84,7 +84,10 @@ sealed class Engine
 
     /// Puts a synced item on the clipboard. Called on the engine thread.
     public Action<Clip> Apply = _ => { };
+    /// History changed.
     public Action Received = () => { };
+    /// That change was an item arriving or moving up, which the bubble announces.
+    public Action New = () => { };
     public Action Status = () => { };
     /// Called on the engine thread with every transfer about four times a second while files move.
     public Action<Dictionary<string, Transfer>> Transfers = _ => { };
@@ -453,6 +456,7 @@ sealed class Engine
         var hasRow = db.Exists(e.Hash);
         var newest = db.Clips(limit: 1).FirstOrDefault();
         var fresh = now - (e.Time - s.Offset) < 10 && e.Time > (newest?.Time ?? 0);
+        var isNew = false;
         switch (SyncRules.Merge(db.Stamp(e.Hash), hasRow, st))
         {
             case MergeAction.Delete:
@@ -462,12 +466,14 @@ sealed class Engine
                 break;
             case MergeAction.Bump:
                 db.Bump(e.Hash, e.Time);
+                isNew = true;
                 if (fresh && db.ByHash(e.Hash) is { Remote: false } bumped) ApplyNow(bumped, s);
                 break;
             default:
                 if (!db.Allowed(e.Kind, e.Source)) return;
                 var named = e.Kind == "file" ? e with { Text = string.Join("\n", e.Text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(SafeFileName)) } : e;
                 db.Insert(named, e.Origin == Device ? "" : e.Origin);
+                isNew = true;
                 if (e.Kind == "text" && fresh && db.ByHash(e.Hash) is { } added) ApplyNow(added, s);
                 break;
         }
@@ -482,6 +488,7 @@ sealed class Engine
             }
         }
         Received();
+        if (isNew) New();
     }
 
     void ApplyNow(Clip c, Session s)

@@ -412,6 +412,8 @@ static class Program
         e.Transfers = t => { lock (seen) seen.AddRange(t.Select(p => (p.Key, p.Value))); };
         e.Apply = c => { lock (applied) applied.Add(c.Hash); };
         bool Applied(string h) { lock (applied) return applied.Contains(h); }
+        var news = 0;
+        e.New = () => Interlocked.Increment(ref news);
 
         var info = new ProcessStartInfo(swift) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, StandardInputEncoding = new UTF8Encoding(false) };
         foreach (var (k, v) in env) info.Environment[k] = v;
@@ -431,6 +433,7 @@ static class Program
         Check(landed.EndsWith(Path.Combine("Downloads", "ClipBubble", "Mac", "big file.bin")), "lands in Downloads\\ClipBubble\\Mac: " + landed);
         Check(WaitFor(() => Applied("t:" + Sha(liveThere))), "a fresh copy on the Mac lands here");
         Check(!Applied(macText), "old history doesn't touch the clipboard");
+        Check(WaitFor(() => Volatile.Read(ref news) == 3), "news is the Mac's two rows and that copy, not the waiting file offered again or its bytes finishing: " + news);
 
         var appliedThere = Path.Combine(peerHome, "applied.txt");
         bool AppliedThere(string h) => File.Exists(appliedThere) && File.ReadAllText(appliedThere).Contains(h);

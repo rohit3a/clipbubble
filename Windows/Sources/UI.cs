@@ -2094,7 +2094,7 @@ sealed class App : Application
         Listen(Program.OpenEvent, () => { if (!panel.IsVisible) ShowPanel(); });
     }
 
-    int receivedPending;
+    int receivedPending, newPending;
 
     /// Links with ClipBubble on the hosts the user switched on, and lets other machines link here.
     void StartSync()
@@ -2105,7 +2105,8 @@ sealed class App : Application
         model.Sync = sync;
         sync.Apply = c => Dispatcher.BeginInvoke(new Action(() => ApplySynced(c)));
         // Many items arrive at once when a link first reconciles: one refresh covers them all.
-        sync.Received = () => { if (Interlocked.Exchange(ref receivedPending, 1) == 0) Dispatcher.BeginInvoke(new Action(() => { receivedPending = 0; Captured(); })); };
+        sync.Received = () => { if (Interlocked.Exchange(ref receivedPending, 1) == 0) Dispatcher.BeginInvoke(new Action(() => { receivedPending = 0; RefreshLists(); })); };
+        sync.New = () => { if (Interlocked.Exchange(ref newPending, 1) == 0) Dispatcher.BeginInvoke(new Action(() => { newPending = 0; Captured(); })); };
         sync.Status = () => Dispatcher.BeginInvoke(new Action(model.SyncChanged));
         sync.Transfers = t => Dispatcher.BeginInvoke(new Action(() => model.SetTransfers(t)));
         Microsoft.Win32.SystemEvents.PowerModeChanged += (_, x) => { if (x.Mode == Microsoft.Win32.PowerModes.Resume) sync.Redial(); };

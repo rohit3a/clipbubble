@@ -209,7 +209,8 @@ class App(Gtk.Application):
 
         self.capture = Capture(self.shell, on_change=self.captured_from_board)
         self.engine.apply = self.apply_synced
-        self.engine.on_received = lambda: GLib.idle_add(self.captured)
+        self.engine.on_received = lambda: GLib.idle_add(self.refresh_lists)
+        self.engine.on_new = lambda: GLib.idle_add(self.captured)
         self.engine.on_status = lambda: GLib.idle_add(self.statuses_changed)
         self.engine.on_transfers = lambda t: GLib.idle_add(self.transfers_changed, t)
         self.engine.start()
@@ -298,11 +299,16 @@ class App(Gtk.Application):
                 self.db.delete(hash=newest[0].hash)
         self.captured()
 
-    def captured(self):
+    def refresh_lists(self):
+        """History changed, but there's nothing new to announce."""
         self.push_peek()
         if self.win.get_visible():
             self.reload()
-        else:
+        return False
+
+    def captured(self):
+        self.refresh_lists()
+        if not self.win.get_visible():
             self.unseen += 1
         self.push_bubble()
         self.shell.pulse()

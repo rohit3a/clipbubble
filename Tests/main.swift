@@ -31,6 +31,7 @@ boundaryTests()
 sweepTests()
 pairingTests()
 updaterTests()
+syncBadgeTests()
 bubbleTests()
 
 try? FileManager.default.removeItem(at: testHome)

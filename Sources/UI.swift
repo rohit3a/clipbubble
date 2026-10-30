@@ -1172,13 +1172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         capture = Capture { [weak self] copied in DispatchQueue.main.async { self?.clipboardChanged(copied: copied) } }
         // Before the folder watchers: a pending privacy prompt for a folder mustn't keep linked devices waiting.
         let sync = SyncEngine.shared
-        sync.onReceived = { [weak self] in self?.captured() }
+        sync.onReceived = { [weak self] in self?.refreshLists() }
+        sync.onNew = { [weak self] in self?.captured() }
         sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
-        sync.onTransfers = { [weak self] t in
-            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
-            self?.model.transfers = t
-            if finished { self?.captured() }
-        }
+        sync.onTransfers = { [weak self] in self?.transfersChanged($0) }
         sync.start()
         Updater.shared.start()
         syncScreenshots()
@@ -1383,6 +1380,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func clipboardChanged(copied: Bool) {
         guard copied else { return refreshLists() }
         captured()
+    }
+
+    func transfersChanged(_ t: [String: Transfer]) {
+        let finished = model.transfers.keys.contains { t[$0] == nil }
+        model.transfers = t
+        if finished { refreshLists() }
     }
 
     /// The mascot hops and the bubble flashes opaque whenever something is captured.

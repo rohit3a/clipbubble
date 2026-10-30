@@ -12,8 +12,10 @@ final class SyncEngine {
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     /// Puts a synced item on the clipboard. Tests and `--peer-stdio` swap it so they never touch the real one.
     var apply: (Clip) -> Void = Platform.apply
-    /// Main thread: an item arrived (for the bubble), or a link's state changed (for Settings).
+    /// Main thread: history changed, or a link's state changed (for Settings).
     var onReceived: () -> Void = {}
+    /// Main thread, after `onReceived`: that change was an item arriving or moving up (for the bubble).
+    var onNew: () -> Void = {}
     var onStatus: () -> Void = {}
     /// Main thread: files moving right now, about four times a second while any are.
     var onTransfers: ([String: Transfer]) -> Void = { _ in }
@@ -386,6 +388,7 @@ final class SyncEngine {
         let row = db.clip(hash: e.hash)
         // Copied seconds ago on its device, and newer than anything here: it's what you just copied, so it goes on the clipboard.
         let fresh = Date().timeIntervalSince1970 - (e.time - s.offset) < 10 && e.time > (db.clips(limit: 1).first?.created.timeIntervalSince1970 ?? 0)
+        var new = false
         switch merge(local: db.stamp(hash: e.hash), hasRow: row != nil, incoming: st) {
         case .delete:
             return
@@ -393,12 +396,14 @@ final class SyncEngine {
             guard row?.remote == true else { return }
         case .bump:
             db.bump(hash: e.hash, to: e.time)
+            new = true
             if fresh, let c = db.clip(hash: e.hash), !c.remote { applyNow(c, to: s) }
         case .insert:
             guard db.allowed(kind: e.kind, source: e.source) else { return }
             var named = e
             if e.kind == "file" { named.text = e.text.split(separator: "\n").map { safeFileName(String($0)) }.joined(separator: "\n") }
             db.insert(named, origin: e.origin == device ? "" : e.origin)
+            new = true
             if e.kind == "text", fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
         }
         // Still missing its bytes, whether new here or left over from a link that dropped mid-download.
@@ -409,7 +414,7 @@ final class SyncEngine {
                 watchTransfers()
             }
         }
-        notifyUI()
+        notifyUI(new: new)
     }
 
     private func applyNow(_ c: Clip, to s: Session) {
@@ -427,7 +432,7 @@ final class SyncEngine {
         notifyUI()
     }
 
-    private func notifyUI() { DispatchQueue.main.async { self.onReceived() } }
+    private func notifyUI(new: Bool = false) { DispatchQueue.main.async { self.onReceived(); if new { self.onNew() } } }
 
     /// `--peer-stdio`: one session on this process's stdin and stdout, with no UI. For tests and interop checks.
     func serveStdio() {
