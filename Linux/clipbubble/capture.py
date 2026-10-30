@@ -1,4 +1,5 @@
 """Saves every copy into history, with the Mac's rules: settle first, skip secrets, drop paste-throughs."""
+import os
 import time
 
 from . import board
@@ -43,13 +44,16 @@ class Capture:
     def settled(self):
         self.timer = 0
         mimes = set(self.mimes)
-        # What sync or the panel just put there is already in history.
-        if self.ours or not mimes or mimes & board.SECRET_TYPES:
+        # What sync or the panel just put there is already in history, and copying the last item again is a new copy.
+        if self.ours:
+            self.last = self.previous = None
+            return False
+        if not mimes or mimes & board.SECRET_TYPES:
             return False
         clip = board.read(self.shell, mimes)
         if not clip:
             return False
-        kind, text, file, h = clip
+        kind, text, file, h, png = clip
         if self.last and h == self.last[0] and self.db.exists(h):
             return False
         source = app_name(self.shell.focused())
@@ -64,6 +68,9 @@ class Capture:
             self.previous = None
             self.on_change()
             return False
+        if png and not os.path.exists(file):
+            with open(file, "wb") as f:
+                f.write(png)
         inserted = not self.db.exists(h)
         self.db.upsert(kind, text, file, source, h)
         self.previous = self.last[0] if self.last else None

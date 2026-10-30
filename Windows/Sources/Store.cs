@@ -279,13 +279,36 @@ sealed partial class Db : IDisposable
 
     public void Delete(string hash) => DeleteWhere("WHERE hash = ?", hash);
     public void Delete(long id) => DeleteWhere("WHERE id = ?", id);
-    public void DeleteAll() => DeleteWhere("");
+    public void DeleteAll()
+    {
+        DeleteWhere("");
+        try { Directory.Delete(Path.Combine(Paths.Dir, "incoming"), true); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
 
     /// Drops everything older than the 7-day retention window, and deletes no device needs to hear about any more.
     public void Prune()
     {
         DeleteWhere("WHERE created < ?", forget: false, Now - Retention);
         Run("DELETE FROM forgotten WHERE at < ?", Now - Retention - 86400);
+        Sweep(DateTime.UtcNow.AddSeconds(-Retention));
+    }
+
+    /// Downloads cut off and never resumed, and images with no row. Only ones older than the window, so a capture or a
+    /// transfer in progress is safe.
+    void Sweep(DateTime cutoff)
+    {
+        var kept = new HashSet<string>(Select("").Select(c => Path.GetFileName(c.File ?? "")));
+        foreach (var dir in new[] { Paths.Images, Path.Combine(Paths.Dir, "incoming") })
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (var f in Directory.GetFiles(dir))
+            {
+                if (kept.Contains(Path.GetFileName(f)) || File.GetLastWriteTimeUtc(f) >= cutoff) continue;
+                try { File.Delete(f); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            }
+        }
     }
 
     void DeleteWhere(string where, params object?[] args) => DeleteWhere(where, forget: true, args);

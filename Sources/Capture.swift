@@ -44,7 +44,8 @@ final class Capture {
         if pb.changeCount != seenCount { seenCount = pb.changeCount; seenAt = now; return }
         guard seenCount != count, now.timeIntervalSince(seenAt) >= 0.6 else { return }
         count = seenCount
-        if Self.isSyncWrite(count) { return }
+        // Sync replaced the last copy, so copying that again is a new copy.
+        if Self.isSyncWrite(count) { last = nil; previousHash = nil; return }
         let types = Set((pb.types ?? []).map(\.rawValue))
         guard !types.isEmpty, types.isDisjoint(with: Self.skipTypes), let clip = read(pb) else { return }
         // The same copy again is a no-op, unless it was deleted from history in between.
@@ -64,6 +65,9 @@ final class Capture {
             return
         }
 
+        if let png = clip.png, let path = clip.file, !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: png)
+        }
         let inserted = !db.exists(hash: clip.hash)
         db.upsert(kind: clip.kind, text: clip.text, file: clip.file, source: source, hash: clip.hash)
         previousHash = last?.hash
@@ -71,23 +75,22 @@ final class Capture {
         onChange()
     }
 
-    private func read(_ pb: NSPasteboard) -> (kind: String, text: String, file: String?, hash: String)? {
+    /// What's on the clipboard. An image isn't written anywhere yet: Copied images might be off.
+    private func read(_ pb: NSPasteboard) -> (kind: String, text: String, file: String?, hash: String, png: Data?)? {
         let string = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let looksLikeURL = string.map { !$0.contains(" ") && !$0.contains("\n") && $0.hasPrefix("http") } ?? false
 
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
             let paths = urls.map(\.path).joined(separator: "\n")
-            return ("file", paths, nil, "f:" + sha(paths))
+            return ("file", paths, nil, "f:" + sha(paths), nil)
         }
         if string?.isEmpty ?? true || looksLikeURL, let png = imagePNG(pb) {
             let h = sha(png)
-            let path = Paths.images.appendingPathComponent(h + ".png").path
-            if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: png) }
-            return ("image", "", path, "i:" + h)
+            return ("image", "", Paths.images.appendingPathComponent(h + ".png").path, "i:" + h, png)
         }
         if let raw = pb.string(forType: .string), !(string?.isEmpty ?? true), raw.utf8.count <= Sync.maxText {
-            return ("text", raw, nil, "t:" + sha(raw))
+            return ("text", raw, nil, "t:" + sha(raw), nil)
         }
         return nil
     }

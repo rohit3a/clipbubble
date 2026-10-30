@@ -28,6 +28,7 @@ syncTests()
 storeTests()
 linkTests()
 boundaryTests()
+sweepTests()
 pairingTests()
 updaterTests()
 

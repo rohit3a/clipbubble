@@ -82,6 +82,30 @@ static class Program
 
     static IEnumerable<(string, Action)> All() => new (string, Action)[]
     {
+        ("prune clears old leftovers and nothing else", () =>
+        {
+            using var db = new Db();
+            var incoming = Path.Combine(Paths.Dir, "incoming");
+            Directory.CreateDirectory(incoming);
+            Directory.CreateDirectory(Paths.Images);
+            var kept = Path.Combine(Paths.Images, "kept.png");
+            db.Upsert(ClipKind.Image, "", kept, "Paint", "i:kept");
+            string leftover = Path.Combine(Paths.Images, "leftover.png"), recent = Path.Combine(Paths.Images, "recent.png"), partial = Path.Combine(incoming, "partial-0");
+            foreach (var f in new[] { leftover, kept, recent, partial })
+            {
+                File.WriteAllText(f, "x");
+                File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddDays(-30));
+            }
+            File.SetLastWriteTimeUtc(recent, DateTime.UtcNow);
+            db.Prune();
+            Check(!File.Exists(leftover) && !File.Exists(partial), "old leftovers go");
+            Check(File.Exists(kept) && File.Exists(recent), "an image with a row stays, and one too recent to judge");
+            File.Delete(recent);
+            File.WriteAllText(Path.Combine(incoming, "partial-0"), "x");
+            db.DeleteAll();
+            Check(!Directory.Exists(incoming), "Clear all takes partial downloads too");
+        }),
+
         ("QR codes match the ones a phone read", () =>
         {
             // Apple's Vision framework decoded each fixture when it was made, and Linux's encoder matches it too.

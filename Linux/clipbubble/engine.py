@@ -988,7 +988,7 @@ def relay():
         except OSError:
             started = False
         if not started:  # no systemd here: start the app on its own
-            subprocess.Popen([sys.executable, "-P", "-m", "clipbubble"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            subprocess.Popen([sys.executable, "-m", "clipbubble"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(40):
             time.sleep(0.25)

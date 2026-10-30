@@ -72,11 +72,11 @@ def _file_paths(shell, mimes):
 
 
 def read(shell, mimes):
-    """(kind, text, file, hash) for what's on the clipboard now, or None."""
+    """(kind, text, file, hash, png) for what's on the clipboard now, or None. An image isn't written anywhere yet."""
     paths = _file_paths(shell, mimes)
     if paths:
         joined = "\n".join(paths)
-        return ("file", joined, None, "f:" + sha(joined))
+        return ("file", joined, None, "f:" + sha(joined), None)
     raw = None
     for mime in TEXT_TYPES:
         if mime in mimes:
@@ -92,10 +92,7 @@ def read(shell, mimes):
         png = to_png(data, image) if data else None
         if png:
             h = sha(png)
-            path = IMAGES / (h + ".png")
-            if not path.exists():
-                path.write_bytes(png)
-            return ("image", "", str(path), "i:" + h)
+            return ("image", "", str(IMAGES / (h + ".png")), "i:" + h, png)
     if stripped and len(raw) <= MAX_TEXT:
-        return ("text", text, None, "t:" + sha(text))
+        return ("text", text, None, "t:" + sha(text), None)
     return None

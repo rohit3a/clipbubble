@@ -179,6 +179,9 @@ sealed class Recorder(Db db)
         if (Classify(s) is not { } clip) return false;
         if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5 && e.MoveUp != clip.Hash)
         {
+            // Sync or the panel replaced the last copy, so copying that again is a new copy.
+            last = null;
+            previousHash = null;
             if (e.MoveUp == null) return false;
             db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
             return true;
