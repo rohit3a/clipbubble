@@ -619,9 +619,10 @@ final class HostLink {
     func networkChanged() {
         if case .offline = state { return redial() }
         guard state.ok, let s = session else { return }
+        let asked = DispatchTime.now()
         s.send(.ping(Date().timeIntervalSince1970))
-        engine.queue.asyncAfter(deadline: .now() + Self.probeLimit) { [weak self, weak s] in
-            guard let self, let s, session === s, s.silence >= Self.probeLimit else { return }
+        engine.queue.asyncAfter(deadline: asked + Self.probeLimit) { [weak self, weak s] in
+            guard let self, let s, session === s, s.heardAt < asked else { return }
             SyncLog.write("\(alias): no answer after the network changed")
             hangUp()
         }
@@ -674,7 +675,7 @@ final class Session {
     private var control: [Data] = []
     private var uploads: [Upload] = []
     private var writing = false
-    private var heardAt = DispatchTime.now()
+    private(set) var heardAt = DispatchTime.now()
     private(set) var closed = false
     private let writeQueue = DispatchQueue(label: "clipbubble.sync.write", qos: .utility)
 
