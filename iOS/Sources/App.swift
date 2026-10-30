@@ -42,6 +42,37 @@ enum Appearance: String, CaseIterable {
     }
 }
 
+/// An alert in a window of its own. One in the app's window stays hidden behind an open sheet, or is lost while a sheet
+/// opens, and a pairing link can arrive at any moment, even as the app launches.
+@MainActor
+enum Prompt {
+    private static var window: UIWindow?
+
+    static func show(_ title: String, _ message: String, ok: String = "OK", cancel: String? = nil, answer: @escaping (Bool) -> Void = { _ in }) {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return answer(false) }
+        let w = UIWindow(windowScene: scene)
+        w.windowLevel = .alert
+        w.overrideUserInterfaceStyle = scene.windows.first?.overrideUserInterfaceStyle ?? .unspecified
+        w.rootViewController = UIViewController()
+        w.isHidden = false
+        window = w
+        func button(_ title: String, _ style: UIAlertAction.Style, _ yes: Bool) -> UIAlertAction {
+            UIAlertAction(title: title, style: style) { _ in window = nil; answer(yes) }
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        if let cancel { alert.addAction(button(cancel, .cancel, false)) }
+        alert.addAction(button(ok, .default, true))
+        w.rootViewController?.present(alert, animated: true)
+    }
+}
+
+/// The short line at the bottom of every tab.
+struct Line: Equatable {
+    enum Look { case done, failed, busy }
+    var text: String
+    var look = Look.done
+}
+
 /// History and link state for the screens. Everything here is read and changed on the main thread.
 @MainActor
 final class Model: ObservableObject {
@@ -50,9 +81,10 @@ final class Model: ObservableObject {
     @Published var statuses: [String: LinkState] = [:]
     @Published var devices: [String: String] = [:]
     @Published var query = "" { didSet { reload() } }
-    /// A short line at the bottom: what just happened.
-    @Published var toast: String?
-    @Published var pairing: String?
+    @Published private(set) var transfers: [String: Transfer] = [:]
+    @Published private var toast: Line?
+    @Published private(set) var linking = false
+    private var confirmingLink = false
     private let db = DB()
     private var toastTask: Task<Void, Never>?
 
@@ -61,9 +93,14 @@ final class Model: ObservableObject {
         engine.onReceived = { [weak self] in self?.reload() }
         engine.onStatus = { [weak self] in self?.statuses = engine.statuses; self?.reload() }
         engine.onApplied = { [weak self] _, peer in self?.say("On \(peer)'s clipboard") }
+        engine.onTransfers = { [weak self] in self?.transfers = $0 }
         engine.start()
         DB().prune()
         reload()
+        // Clipboard history doesn't belong in device backups, least of all whatever password was copied today.
+        var dir = Paths.dir, values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
         // The share sheet and the keyboard write to the same history while the app is away.
         NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in DB().prune(); self?.hosts = SyncEngine.enabledHosts; self?.reload() }
@@ -81,14 +118,17 @@ final class Model: ObservableObject {
     }
 
     func reload() {
-        clips = db.clips(query: query.isEmpty ? nil : query)
+        clips = db.clips(query: query.isEmpty ? nil : query, preview: true)
         devices = db.deviceNames()
     }
 
     /// Everything kept, for the Library.
     func library(query: String) -> [Clip] {
-        db.clips(limit: 5000, query: query.isEmpty ? nil : query)
+        db.clips(limit: 5000, query: query.isEmpty ? nil : query, preview: true)
     }
+
+    func clip(_ hash: String) -> Clip? { db.clip(hash: hash) }
+    func whole(_ c: Clip) -> Clip { db.whole(c) }
 
     func add(_ alias: String) {
         guard SSHTarget(alias) != nil, !hosts.contains(alias) else { return }
@@ -100,6 +140,9 @@ final class Model: ObservableObject {
         hosts.removeAll { $0 == alias }
         SyncEngine.shared.setHost(alias, on: false)
         Addresses.forget(alias)
+        // Left behind, the old host key would refuse this computer if it came back after a reinstall.
+        guard let t = SSHTarget(alias), !hosts.contains(where: { SSHTarget($0)?.host == t.host && SSHTarget($0)?.port == t.port }) else { return }
+        Platform.defaults.removeObject(forKey: "sync.hostkey.\(t.host):\(t.port)")
     }
 
     func redialAll() { hosts.forEach { SyncEngine.shared.redial($0) } }
@@ -109,12 +152,22 @@ final class Model: ObservableObject {
         reload()
     }
 
-    func copy(_ c: Clip) {
-        if c.remote {
-            SyncEngine.shared.get(c.hash)
-            return say("Getting it from \(devices[c.origin] ?? "your computer")…")
+    func clearHistory() {
+        db.deleteAll()
+        reload()
+        say("History cleared")
+    }
+
+    func get(_ c: Clip) {
+        let device = devices[c.origin] ?? "Your computer"
+        SyncEngine.shared.get(c.hash) { [weak self] started in
+            self?.say(started ? "Getting it from \(device)…" : "\(device) isn't connected", started ? .busy : .failed)
         }
-        guard Clipboard.write(c) else { return say("Couldn't copy that") }
+    }
+
+    func copy(_ c: Clip) {
+        if c.remote { return get(c) }
+        guard Clipboard.write(whole(c)) else { return say("Couldn't copy that", .failed) }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         say("Copied")
     }
@@ -124,7 +177,8 @@ final class Model: ObservableObject {
         Task {
             let added = await Inbox.add(providers, source: "Clipboard")
             reload()
-            say(added.isEmpty ? "Nothing to paste" : hosts.isEmpty ? "Saved" : statuses.values.contains { $0.ok } ? "Sending…" : "Saved, sends when linked")
+            if added.isEmpty { return say("Nothing to paste", .failed) }
+            say(hosts.isEmpty ? "Saved" : statuses.values.contains { $0.ok } ? "Sending…" : "Saved, sends when linked")
         }
     }
 
@@ -133,12 +187,13 @@ final class Model: ObservableObject {
     }
 
     func addFiles(_ urls: [URL]) {
-        added(urls.compactMap { Inbox.file($0, source: "iPhone") })
+        say("Adding…", .busy)
+        Task { added(await Task.detached { urls.compactMap { Inbox.file($0, source: "iPhone") } }.value) }
     }
 
     /// Pictures join as images, so they paste as pictures on the computer; videos join as files.
     func addPhotos(_ items: [PhotosPickerItem]) {
-        say("Adding…")
+        say("Adding…", .busy)
         Task {
             var hashes: [String] = []
             for item in items {
@@ -146,7 +201,7 @@ final class Model: ObservableObject {
                 if item.supportedContentTypes.contains(where: { $0.conforms(to: .image) }), let d = try? await item.loadTransferable(type: Data.self) {
                     h = await Task.detached { Inbox.image(d, source: "iPhone") }.value
                 } else if let f = try? await item.loadTransferable(type: PickedFile.self) {
-                    h = Inbox.file(f.url, source: "iPhone")
+                    h = await Task.detached { Inbox.moved(f.url, source: "iPhone") }.value
                 } else { h = nil }
                 if let h { hashes.append(h) }
             }
@@ -157,31 +212,50 @@ final class Model: ObservableObject {
     /// Something added by hand is meant for the computers now, so files go over without waiting for Get.
     private func added(_ hashes: [String]) {
         reload()
-        guard !hashes.isEmpty else { return say("Couldn't add that") }
+        guard !hashes.isEmpty else { return say("Couldn't add that", .failed) }
         let engine = SyncEngine.shared
         for h in hashes where h.hasPrefix("f:") { engine.linked.forEach { engine.send(h, toDevice: $0.device) } }
         say(hosts.isEmpty ? "Added" : statuses.values.contains { $0.ok } ? "Sent to your computers" : "Added, sends when linked")
     }
 
+    /// A pairing link from the Camera, a scan or anywhere else. Nothing leaves this iPhone until you say yes, because
+    /// the computer you link gets everything you copy. Its address leads, since it can call itself anything.
     func open(_ url: URL) {
-        guard url.host == "pair" else { return }
-        pairing = "Linking…"
+        guard url.host == "pair", !linking, !confirmingLink else { return }
+        guard let link = Pairing.Link(url) else { return Prompt.show("Link a computer", Pairing.Failure.badLink.localizedDescription) }
+        confirmingLink = true
+        let name = link.name.map { "It calls itself \($0). " } ?? ""
+        Prompt.show("Link the computer at \(link.hosts[0])?",
+                    name + "It will get everything you copy here. Only link a computer you're setting up right now.",
+                    ok: "Link", cancel: "Cancel") { [weak self] yes in
+            self?.confirmingLink = false
+            if yes { self?.pair(link) }
+        }
+    }
+
+    private func pair(_ link: Pairing.Link) {
+        linking = true
         Task {
             do {
-                let (alias, name) = try await Pairing.pair(url)
-                Pairing.olderLinks(than: alias).forEach(remove)
+                let (alias, name) = try await Pairing.pair(link)
                 add(alias)
+                Pairing.olderLinks(than: alias).forEach(remove)
                 SyncEngine.shared.redial(alias)
-                pairing = nil
+                linking = false
                 say("Linked with \(name)")
             } catch {
-                pairing = error.localizedDescription
+                linking = false
+                Prompt.show("Link a computer", error.localizedDescription)
             }
         }
     }
 
-    func say(_ s: String) {
-        toast = s
+    /// What the bottom line shows: linking for as long as it lasts, or what just happened.
+    var line: Line? { linking ? Line(text: "Linking…", look: .busy) : toast }
+
+    func say(_ s: String, _ look: Line.Look = .done) {
+        toast = Line(text: s, look: look)
+        AccessibilityNotification.Announcement(s).post()
         toastTask?.cancel()
         toastTask = Task { try? await Task.sleep(nanoseconds: 2_500_000_000); if !Task.isCancelled { toast = nil } }
     }
@@ -222,6 +296,7 @@ struct HistoryView: View {
         .sheet(isPresented: Binding(get: { !welcomed && model.hosts.isEmpty }, set: { if !$0 { welcomed = true } })) {
             Welcome { welcomed = true; tab = .settings }
         }
+        .onChange(of: model.linking) { if model.linking { welcomed = true } }
         .photosPicker(isPresented: shows(.photos), selection: $photos, maxSelectionCount: 20, matching: .any(of: [.images, .videos]))
         .onChange(of: photos) {
             guard !photos.isEmpty else { return }
@@ -231,9 +306,6 @@ struct HistoryView: View {
         .fileImporter(isPresented: shows(.files), allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.addFiles(urls) }
         }
-        .alert("Link a computer", isPresented: Binding(get: { model.pairing != nil && model.pairing != "Linking…" }, set: { if !$0 { model.pairing = nil } })) {
-            Button("OK") { model.pairing = nil }
-        } message: { Text(model.pairing ?? "") }
     }
 
     private func shows(_ a: Adding) -> Binding<Bool> {
@@ -245,7 +317,7 @@ struct HistoryView: View {
             if model.hosts.isEmpty {
                 Section {
                     VStack(alignment: .leading, spacing: 10) {
-                        Image(systemName: "laptopcomputer.and.iphone").font(.title).foregroundStyle(.tint)
+                        Image(systemName: "laptopcomputer.and.iphone").font(.title).foregroundStyle(.tint).accessibilityHidden(true)
                         Text("Copy on your iPhone, paste on your computer, and back.").font(.headline)
                         Text("Link a Mac, Linux or Windows computer running ClipBubble.").font(.subheadline).foregroundStyle(.secondary)
                         Button("Link a computer") { tab = .settings }.buttonStyle(.borderedProminent).padding(.top, 2)
@@ -255,6 +327,11 @@ struct HistoryView: View {
             } else {
                 Section {
                     ForEach(model.hosts, id: \.self) { h in HostRow(alias: h, state: model.statuses[h]) }
+                }
+            }
+            if !model.transfers.isEmpty {
+                Section {
+                    ForEach(model.transfers.sorted { $0.key < $1.key }, id: \.key) { TransferRow(hash: $0.key, transfer: $0.value) }
                 }
             }
             Section {
@@ -271,17 +348,23 @@ struct HistoryView: View {
         .animation(.snappy, value: model.clips.map(\.hash))
         .overlay {
             if model.clips.isEmpty {
-                ContentUnavailableView(model.query.isEmpty ? "Nothing copied yet" : "No matches",
-                                       systemImage: model.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass",
-                                       description: Text(model.query.isEmpty ? "Copy something on a linked computer, or tap Add." : "Try other words."))
-                    .padding(.top, model.hosts.isEmpty ? 220 : 120)
+                ContentUnavailableView {
+                    Label {
+                        Text(model.query.isEmpty ? "Nothing copied yet" : "No matches")
+                    } icon: {
+                        Image(systemName: model.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass").accessibilityHidden(true)
+                    }
+                } description: {
+                    Text(model.query.isEmpty ? "Copy something on a linked computer, or tap Add." : "Try other words.")
+                }
+                .padding(.top, model.hosts.isEmpty ? 220 : 120)
             }
         }
         .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search history")
         .refreshable { model.redialAll() }
         .navigationTitle("ClipBubble")
         .navigationDestination(item: $viewing) { ClipDetail(clip: $0) }
-        .toast(model.toast)
+        .toast(model.line)
     }
 }
 
@@ -312,6 +395,7 @@ struct Welcome: View {
                 Button("Not now") { dismiss() }.font(.body.weight(.medium))
             }
             .padding(.horizontal, 28).padding(.bottom, 12)
+            .background(.background)
         }
         .interactiveDismissDisabled()
     }
@@ -344,7 +428,7 @@ struct AddPanel: View {
                 Task { @MainActor in dismiss() }
             }
             .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.extraLarge)
-            HStack(spacing: 12) {
+            (size.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(spacing: 12))) {
                 option("Text", "text.cursor", .text)
                 option("Photos", "photo.on.rectangle", .photos)
                 option("Files", "folder", .files)
@@ -382,10 +466,19 @@ struct Pressable: ButtonStyle {
 
 extension View {
     /// The short "Copied" line, just above the tab bar.
-    func toast(_ text: String?) -> some View {
+    func toast(_ line: Line?) -> some View {
         safeAreaInset(edge: .bottom) {
-            if let text {
-                Label(text, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.medium))
+            if let line {
+                Label {
+                    Text(line.text)
+                } icon: {
+                    switch line.look {
+                    case .done: Image(systemName: "checkmark.circle.fill")
+                    case .failed: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+                    case .busy: ProgressView().controlSize(.small)
+                    }
+                }
+                .font(.subheadline.weight(.medium))
                     .padding(.horizontal, 16).padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
                     .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
@@ -393,7 +486,7 @@ extension View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.spring(duration: 0.35), value: text)
+        .animation(.spring(duration: 0.35), value: line)
     }
 
     /// iOS 26 shrinks the tab bar while you scroll down a list.
@@ -450,7 +543,7 @@ struct HostRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "laptopcomputer").font(.title3).foregroundStyle(.secondary).frame(width: 32)
+            Image(systemName: "laptopcomputer").font(.title3).foregroundStyle(.secondary).frame(minWidth: 32).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.subheadline.weight(.semibold))
                 // On a timer because "retrying in 8 s" counts down with nothing else changing.
@@ -520,6 +613,8 @@ struct SettingsView: View {
     @State private var alias = ""
     @State private var scanning = false
     @State private var scanFailed = false
+    @State private var confirmClear = false
+    @State private var removing: String?
     @AppStorage("appearance") private var appearance = Appearance.system
 
     var body: some View {
@@ -534,12 +629,19 @@ struct SettingsView: View {
                         Text("The camera isn't available. Allow ClipBubble to use it in Settings, or link by hand below.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                    if model.linking {
+                        Label { Text("Linking…") } icon: { ProgressView() }
+                    }
                 } header: { Text("Link a computer") }
 
                 if !model.hosts.isEmpty {
                     Section("Computers") {
-                        ForEach(model.hosts, id: \.self) { h in HostRow(alias: h, state: model.statuses[h]) }
-                            .onDelete { $0.map { model.hosts[$0] }.forEach(model.remove) }
+                        ForEach(model.hosts, id: \.self) { h in
+                            HStack {
+                                HostRow(alias: h, state: model.statuses[h])
+                                Button("Remove", role: .destructive) { removing = h }.buttonStyle(.borderless).font(.caption)
+                            }
+                        }
                     }
                 }
 
@@ -550,10 +652,10 @@ struct SettingsView: View {
                         Button("Add") { model.add(alias.trimmingCharacters(in: .whitespaces)); alias = "" }
                             .disabled(SSHTarget(alias.trimmingCharacters(in: .whitespaces)) == nil)
                     }
-                    Text(Keys.publicLine).font(.caption.monospaced()).textSelection(.enabled)
-                    Button("Copy this iPhone's key") { UIPasteboard.general.string = Keys.publicLine }
+                    Text(Keys.publicLine).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                    Button("Copy this iPhone's key") { UIPasteboard.general.string = Keys.publicLine; model.say("Copied") }
                 } header: { Text("Linux, Windows, or by hand") } footer: {
-                    Text("Add the key as a line in ~/.ssh/authorized_keys on the computer, with SSH turned on there.")
+                    Text("Add the key as a line in ~/.ssh/authorized_keys on the computer, with SSH turned on there. A key added this way can do anything your account can, so link with the code when you can.")
                 }
 
                 Section("Appearance") {
@@ -571,6 +673,12 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Button("Clear history", role: .destructive) { confirmClear = true }
+                } footer: {
+                    Text("Removes everything ClipBubble has kept, here and on your linked devices.")
+                }
+
+                Section {
                     Link(destination: URL(string: "https://clipbubble.krnl.studio/privacy")!) { Label("Privacy policy", systemImage: "hand.raised") }
                     Link(destination: URL(string: "https://clipbubble.krnl.studio/support")!) { Label("Help and support", systemImage: "questionmark.circle") }
                 } footer: {
@@ -578,6 +686,15 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .toast(model.line)
+            .confirmationDialog("Clear your history here and on your linked devices?", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear history", role: .destructive) { model.clearHistory() }
+            }
+            .confirmationDialog("Stop syncing with this computer?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
+                Button("Remove", role: .destructive) { if let removing { model.remove(removing) } }
+            } message: {
+                Text("To also take this iPhone's access away, unlink it in ClipBubble on the computer.")
+            }
             .sheet(isPresented: $scanning) {
                 NavigationStack {
                     Scanner(found: { url in scanning = false; model.open(url) },

@@ -61,6 +61,7 @@ struct LibraryView: View {
     @State private var all: [Clip] = []
     @Namespace private var chips
     @State private var viewing: Clip?
+    @Environment(\.dynamicTypeSize) private var size
 
     private var shown: [Clip] { all.filter { (look == nil || $0.look == look) && (from == nil || $0.origin == from) } }
 
@@ -73,11 +74,13 @@ struct LibraryView: View {
         ScrollView {
             filters
             if shown.isEmpty {
-                ContentUnavailableView(query.isEmpty ? "Nothing here" : "No matches", systemImage: look?.symbol ?? "square.grid.2x2",
-                                       description: Text(query.isEmpty ? "Try another filter." : "Try other words or another filter."))
+                ContentUnavailableView(!query.isEmpty ? "No matches" : all.isEmpty ? "Nothing copied yet" : "Nothing here",
+                                       systemImage: look?.symbol ?? "square.grid.2x2",
+                                       description: Text(!query.isEmpty ? "Try other words or another filter."
+                                                         : all.isEmpty ? "Copy something on a linked computer, or tap Add." : "Try another filter."))
                     .padding(.top, 60)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 10)], spacing: 10, pinnedViews: [.sectionHeaders]) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: size.isAccessibilitySize ? 300 : 160), spacing: 10)], spacing: 10, pinnedViews: [.sectionHeaders]) {
                 ForEach(days, id: \.day) { d in
                     Section {
                         ForEach(d.clips, id: \.hash) { c in
@@ -107,7 +110,7 @@ struct LibraryView: View {
         .task(id: query) { all = model.library(query: query) }
         .onChange(of: model.clips) { withAnimation(.snappy) { all = model.library(query: query) } }
         .navigationDestination(item: $viewing) { ClipDetail(clip: $0) }
-        .toast(model.toast)
+        .toast(model.line)
     }
 
     /// Devices with something in the library. Names arrive for every device a computer knows, used or not.
@@ -172,16 +175,20 @@ struct LibraryView: View {
 struct LibraryTile: View {
     let clip: Clip
     let device: String?
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Color(.secondarySystemGroupedBackground).frame(height: 130)
                 .overlay(alignment: .topLeading) { content }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-            HStack(spacing: 4) {
-                Image(systemName: clip.remote ? "icloud.and.arrow.down" : clip.look.symbol).foregroundStyle(clip.remote ? .teal : clip.look.tint)
-                Text(device ?? clip.source).lineLimit(1)
-                Spacer(minLength: 4)
+            let footer = size.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2)) : AnyLayout(HStackLayout(spacing: 4))
+            footer {
+                HStack(spacing: 4) {
+                    Image(systemName: clip.remote ? "icloud.and.arrow.down" : clip.look.symbol).foregroundStyle(clip.remote ? .teal : clip.look.tint)
+                    Text(device ?? clip.source).lineLimit(1)
+                }
+                if !size.isAccessibilitySize { Spacer(minLength: 4) }
                 Text(clip.created, format: .dateTime.hour().minute())
             }
             .font(.caption2).foregroundStyle(.secondary)

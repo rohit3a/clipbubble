@@ -97,7 +97,7 @@ final class KeyboardModel: ObservableObject {
     }
 
     func reload() {
-        clips = db.clips(limit: 40)
+        clips = db.clips(limit: 40, preview: true)
         if let h = fetching, let c = clips.first(where: { $0.hash == h && !$0.remote }) {
             fetching = nil
             copy(c)
@@ -112,11 +112,10 @@ final class KeyboardModel: ObservableObject {
     func tap(_ c: Clip) {
         tick()
         if c.kind == "text" {
-            keyboard?.textDocumentProxy.insertText(c.text)
+            keyboard?.textDocumentProxy.insertText(db.whole(c).text)
         } else if c.remote {
             fetching = c.hash
-            SyncEngine.shared.get(c.hash)
-            flash("Getting it from your computer…")
+            SyncEngine.shared.get(c.hash) { [weak self] in self?.flash($0 ? "Getting it from your computer…" : "Your computer isn't connected") }
         } else {
             copy(c)
         }

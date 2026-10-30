@@ -72,13 +72,17 @@ final class SyncEngine {
 
     // MARK: Manual transfers
 
-    /// Get: downloads an item that's still on another device, whatever its size.
-    func get(_ hash: String) {
+    /// Get: downloads an item that's still on another device, whatever its size. `started` says on the main thread
+    /// whether a linked device has it to send; if none does, it comes over once one offers it.
+    func get(_ hash: String, started: @escaping (Bool) -> Void = { _ in }) {
         queue.async { [self] in
             wanted.insert(hash)
-            guard let s = sessions.first(where: { $0.offered[hash] != nil }), let e = s.offered[hash] else { return }
+            guard let s = sessions.first(where: { $0.offered[hash] != nil }), let e = s.offered[hash] else {
+                return DispatchQueue.main.async { started(false) }
+            }
             s.download(makeDownload(e, from: s, apply: false))
             watchTransfers()
+            DispatchQueue.main.async { started(true) }
         }
     }
 
