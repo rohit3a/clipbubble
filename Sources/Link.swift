@@ -256,10 +256,11 @@ final class SyncEngine {
             guard c.text.utf8.count <= Sync.maxText else { return nil }
             e.text = c.text
         case "image":
-            guard !c.remote, let f = c.file, let size = fileSize(f) else { return c.remote ? e : nil }
+            // Offered before its bytes are here, an item is a dead end for every device after this one.
+            guard !c.remote, let f = c.file, let size = fileSize(f) else { return nil }
             e.blobs = [Blob(name: String(c.hash.dropFirst(2)) + ".png", size: size, sha: String(c.hash.dropFirst(2)))]
         default:
-            if c.remote { e.text = c.text; return e }
+            guard !c.remote else { return nil }
             let files = blobFiles(c)
             e.text = c.paths.map { ($0 as NSString).lastPathComponent }.joined(separator: "\n")
             e.blobs = files.compactMap { p in fileSize(p).map { Blob(name: (p as NSString).lastPathComponent, size: $0, sha: "") } }

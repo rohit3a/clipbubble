@@ -296,14 +296,18 @@ class Engine:
     def entry(self, c):
         origin = c.origin or self.device
         if c.kind == "text":
+            # Only an old version stores more than this. Sent, it would drop the link on every reconnect.
+            if len(c.text.encode()) > sync.MAX_TEXT:
+                return None
             return Entry(c.hash, c.created, "text", c.text, c.source, origin)
+        # Offered before its bytes are here, an item is a dead end for every device after this one.
+        if c.remote:
+            return None
         if c.kind == "image":
-            if c.remote or not c.file or not os.path.exists(c.file):
-                return Entry(c.hash, c.created, "image", "", c.source, origin) if c.remote else None
+            if not c.file or not os.path.exists(c.file):
+                return None
             h = c.hash[2:]
             return Entry(c.hash, c.created, "image", "", c.source, origin, (Blob(h + ".png", os.path.getsize(c.file), h),))
-        if c.remote:
-            return Entry(c.hash, c.created, "file", c.text, c.source, origin)
         names = "\n".join(os.path.basename(p) for p in c.paths)
         blobs = tuple(Blob(os.path.basename(p), os.path.getsize(p), "") for p in self.blob_files(c))
         return Entry(c.hash, c.created, "file", names, c.source, origin, blobs)

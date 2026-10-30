@@ -12,6 +12,8 @@ static class SyncProto
 {
     public const int Version = 1;
     public const int MaxFrame = 4 << 20;
+    /// The longest text that goes in the history, well inside a frame.
+    public const int MaxText = 2_000_000;
     public const int ChunkSize = 256 << 10;
     public const long AutoFetchLimit = 25 << 20;
 }

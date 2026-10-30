@@ -56,6 +56,8 @@ sealed class RawPeer : IDisposable
 
     public Entry? Put(string hash) => First(f => f is Entry e && e.Hash == hash) as Entry;
 
+    public bool Has(string hash) { lock (frames) return frames.Any(f => f is Entry e && e.Hash == hash); }
+
     /// The bytes of a chunk, or null for a cancel.
     public byte[]? Fetch(string hash, int index = 0, long offset = 0)
     {
@@ -145,6 +147,32 @@ static class Boundary
                 Program.Check(early.Fetch(shotHash) == null, "switching a category off takes back what was offered");
                 using var hidden = new RawPeer(e, "hidden");
                 Program.Check(hidden.Fetch(shotHash) == null, "and it isn't offered to the next device");
+            }
+            Prefs.SetOn("files", true);
+
+            var pic = Path.Combine(home, "relayed.png");
+            File.WriteAllText(pic, "relayed picture");
+            var picHash = "i:" + Store.Sha(File.ReadAllBytes(pic));
+            db.Insert(new Entry(picHash, Engine.Now - 60, "image", "", "Preview", "elsewhere", new[] { new Blob("relayed.png", 15, picHash.Substring(2)) }), "elsewhere");
+            var marker = "after the waiting row " + Engine.Now;
+            db.Upsert(ClipKind.Text, marker, null, "Notepad", "t:" + Store.Sha(marker));
+            using (var third = new RawPeer(e, "third"))
+            {
+                Program.Check(third.Put("t:" + Store.Sha(marker)) != null, "the third device gets what this one holds");
+                Program.Check(!third.Has(picHash), "but no item with its bytes still on the way");
+                db.Received(picHash, pic);
+                Program.Check(third.Put(picHash)?.Blobs.Count == 1, "it's offered as soon as they arrive");
+                Program.Check(third.Fetch(picHash)?.SequenceEqual(File.ReadAllBytes(pic)) == true, "and comes over");
+            }
+
+            var big = new string('x', SyncProto.MaxFrame + 1);
+            var after = "after the big row " + Engine.Now;
+            using (var peer = new RawPeer(e, "big"))
+            {
+                db.Upsert(ClipKind.Text, big, null, "Notepad", "t:" + Store.Sha(big));
+                db.Upsert(ClipKind.Text, after, null, "Notepad", "t:" + Store.Sha(after));
+                Program.Check(peer.Put("t:" + Store.Sha(after)) != null, "a row too big to sync doesn't stop the next copy");
+                Program.Check(!peer.Has("t:" + Store.Sha(big)), "and stays here");
             }
         }
         finally

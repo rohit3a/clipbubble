@@ -220,7 +220,7 @@ sealed class Recorder(Db db)
     record Classified(ClipKind Kind, string Text, string Hash, byte[]? Png);
 
     /// Text bigger than this (a log dump, a database export) isn't kept: it would slow every list and search.
-    public const int MaxTextBytes = 2_000_000;
+    public const int MaxTextBytes = SyncProto.MaxText;
 
     /// Same order as the Mac: files, then an image unless there's real text alongside it, then text.
     static Classified? Classify(Snapshot s)

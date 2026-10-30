@@ -152,6 +152,34 @@ class Boundary(unittest.TestCase):
         self.addCleanup(hidden.close)
         self.assertIsNone(hidden.fetch(h), "and it isn't offered to the next device")
 
+    def test_an_item_is_offered_once_its_bytes_are_here(self):
+        pic = self.home / "relayed.png"
+        pic.write_bytes(b"relayed picture")
+        h = "i:" + sha(b"relayed picture")
+        now = time.time()
+        self.db.insert(Entry(h, now - 60, "image", "", "Preview", "elsewhere", (Blob("relayed.png", 15, h[2:]),)), "elsewhere")
+        self.addCleanup(self.db.delete, hash=h)
+        marker = f"after the waiting row {now}"
+        self.db.upsert("text", marker, None, "Notes", "t:" + sha(marker))
+        third = RawPeer(self.engine, "third")
+        self.addCleanup(third.close)
+        self.assertIsNotNone(third.put("t:" + sha(marker)))
+        self.assertIsNone(third.first(lambda f: f[0] == sync.PUT and f[1].hash == h, seconds=0), "no item with its bytes on the way")
+        self.db.received(h, file=str(pic))
+        self.assertEqual(len(third.put(h).blobs), 1, "offered as soon as they arrive")
+        self.assertEqual(third.fetch(h), b"relayed picture")
+
+    def test_text_too_big_for_a_frame_stays_here(self):
+        big = "x" * (sync.MAX_FRAME + 1)
+        after = f"after the big row {time.time()}"
+        peer = RawPeer(self.engine, "big")
+        self.addCleanup(peer.close)
+        self.db.upsert("text", big, None, "Notes", "t:" + sha(big))
+        self.addCleanup(self.db.delete, hash="t:" + sha(big))
+        self.db.upsert("text", after, None, "Notes", "t:" + sha(after))
+        self.assertIsNotNone(peer.put("t:" + sha(after)), "the next copy still goes over")
+        self.assertIsNone(peer.first(lambda f: f[0] == sync.PUT and f[1].hash == "t:" + sha(big), seconds=0))
+
 
 if __name__ == "__main__":
     unittest.main()

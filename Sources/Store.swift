@@ -287,6 +287,7 @@ final class DB {
     func received(hash: String, file: String?, text: String?) {
         if let text { run("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", text, hash) }
         else { run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash) }
+        DB.changed?([hash])
     }
 
     /// Whether this was news: a device not seen before, or one with a new name.

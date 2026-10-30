@@ -3,10 +3,10 @@ import os
 from urllib.parse import quote, unquote, urlparse
 
 from .store import IMAGES, is_image_path, sha
+from .sync import MAX_TEXT
 
 TEXT_TYPES = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING"]
 SECRET_TYPES = {"x-kde-passwordManagerHint"}
-MAX_TEXT = 2_000_000
 
 
 def png_data(path):

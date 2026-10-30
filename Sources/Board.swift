@@ -22,7 +22,7 @@ enum Board {
             NSPasteboard.general.setData(d, forType: .png)
             return true
         default:
-            let urls = c.paths.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+            let urls = c.paths.filter { $0.hasPrefix("/") && FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
             guard !urls.isEmpty else { return false }
             writeFiles(urls)
             return true

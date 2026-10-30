@@ -283,6 +283,7 @@ class DB:
             self.c.execute("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", (text, hash))
         else:
             self.c.execute("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", (file, hash))
+        _notify([hash])
 
     def save_device(self, id, name, os_name):
         """Whether this was news: a device not seen before, or one with a new name."""

@@ -36,6 +36,12 @@ private final class RawPeer {
         return nil
     }
 
+    func has(_ hash: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return frames.contains { if case .put(let e) = $0 { e.hash == hash } else { false } }
+    }
+
     func put(_ hash: String) -> Entry? {
         if case .put(let e)? = first({ if case .put(let e) = $0 { e.hash == hash } else { false } }) { return e }
         return nil
@@ -140,5 +146,24 @@ func boundaryTests() {
     hidden.close()
     early.close()
     db.delete(hash: shotHash)
+
+    // Three devices: this one holds an item from another that its bytes haven't reached yet.
+    let pic = testHome.appendingPathComponent("relayed.png")
+    let picData = Data("relayed picture".utf8)
+    try? picData.write(to: pic)
+    let picHash = "i:" + sha(picData)
+    let now = Date().timeIntervalSince1970
+    db.insert(Entry(hash: picHash, time: now - 60, kind: "image", text: "", source: "Preview", origin: "elsewhere",
+                    blobs: [Blob(name: "relayed.png", size: Int64(picData.count), sha: String(picHash.dropFirst(2)))]), origin: "elsewhere")
+    let marker = "after the waiting row \(now)"
+    db.upsert(kind: "text", text: marker, file: nil, source: "Notes", hash: "t:" + sha(marker))
+    let third = RawPeer(device: "third")
+    check(third.put("t:" + sha(marker)) != nil, "the third device gets what this one holds")
+    check(!third.has(picHash), "but no item with its bytes still on the way")
+    db.received(hash: picHash, file: pic.path, text: nil)
+    check(third.put(picHash)?.blobs.count == 1, "it's offered as soon as they arrive")
+    check(third.fetch(picHash) == picData, "and comes over")
+    third.close()
+    db.delete(hash: picHash)
     engine.apply = { _ in }
 }

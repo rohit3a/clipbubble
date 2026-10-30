@@ -392,6 +392,7 @@ sealed partial class Db : IDisposable
     {
         if (text != null) Run("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", text, hash);
         else Run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash);
+        Notify(new[] { hash });
     }
 
     /// Whether this was news: a device not seen before, or one with a new name.

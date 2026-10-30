@@ -316,14 +316,16 @@ sealed class Engine
         switch (c.Kind)
         {
             case ClipKind.Text:
+                // Only an old version stores more than this. Sent, it would drop the link on every reconnect.
+                if (Encoding.UTF8.GetByteCount(c.Text) > SyncProto.MaxText) return null;
                 return new Entry(c.Hash, c.Time, "text", c.Text, c.Source, origin, none);
             case ClipKind.Image:
-                if (c.Remote) return new Entry(c.Hash, c.Time, "image", "", c.Source, origin, none);
-                if (c.File is not { } f || !File.Exists(f)) return null;
+                // Offered before its bytes are here, an item is a dead end for every device after this one.
+                if (c.Remote || c.File is not { } f || !File.Exists(f)) return null;
                 var h = c.Hash.Substring(2);
                 return new Entry(c.Hash, c.Time, "image", "", c.Source, origin, new[] { new Blob(h + ".png", new FileInfo(f).Length, h) });
             default:
-                if (c.Remote) return new Entry(c.Hash, c.Time, "file", c.Text, c.Source, origin, none);
+                if (c.Remote) return null;
                 var names = string.Join("\n", c.Paths.Select(Path.GetFileName));
                 return new Entry(c.Hash, c.Time, "file", names, c.Source, origin,
                     BlobFiles(c).Select(p => new Blob(Path.GetFileName(p), new FileInfo(p).Length, "")).ToList());
@@ -331,7 +333,10 @@ sealed class Engine
     }
 
     static List<string> BlobFiles(Clip c) =>
-        c.Kind == ClipKind.Image ? (c.File is { } f ? new List<string> { f } : new()) : c.Paths.Where(p => Path.IsPathRooted(p) && File.Exists(p)).ToList();
+        c.Kind == ClipKind.Image ? (c.File is { } f ? new List<string> { f } : new()) : c.Paths.Where(p => IsFullPath(p) && File.Exists(p)).ToList();
+
+    /// Path.IsPathRooted also accepts `\x` and `C:x`, which depend on the current folder. A network share is fine: only this machine puts one in a row.
+    internal static bool IsFullPath(string p) => p.StartsWith(@"\\") || (p.Length > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/'));
 
     // MARK: Frames
 
