@@ -230,10 +230,40 @@ static class Program
         }),
 
         ("a peer reaches only what it was offered", Boundary.Run),
+        ("pairing leaves every other key in authorized_keys alone", PairingKeys),
         ("a live session with the Mac engine", SwiftPeer),
         ("--peer relays ssh to the running app", RelayToApp),
         ("a host link runs ssh and says how it's doing", HostLinkStates),
     };
+
+    static void PairingKeys()
+    {
+        var file = Path.Combine(Home, "authorized_keys");
+        const string body = "AAAAC3NzaC1lZDI1NTE5AAAAIPqR3mUOcskK0AMMwJekuAgZW350J";
+        var line = $"restrict,command=\"x --peer\" ssh-ed25519 {body} ClipBubble on iPhone";
+        byte[] Ascii(string s) => Encoding.ASCII.GetBytes(s);
+        bool Starts(byte[] a, byte[] b) => a.Take(b.Length).SequenceEqual(b);
+        int Lines(byte[] a) => a.Count(x => x == 10);
+
+        var old = Ascii("ssh-ed25519 AAAAone caf").Append((byte)0xE9).Concat(Ascii(" laptop\nssh-ed25519 AAAAtwo work\n")).ToArray();
+        File.WriteAllBytes(file, old);
+        AuthorizedKeys.Add(file, line, body);
+        Check(Starts(File.ReadAllBytes(file), old) && Lines(File.ReadAllBytes(file)) == 3, "a byte that isn't text keeps every key, unchanged");
+
+        File.WriteAllBytes(file, Ascii($"ssh-ed25519 AAAAone laptop\r\nrestrict ssh-ed25519 {body} ClipBubble on iPhone\r\nssh-ed25519 AAAAtwo work\r\n"));
+        AuthorizedKeys.Add(file, line, body);
+        var after = File.ReadAllBytes(file);
+        Check(Starts(after, Ascii("ssh-ed25519 AAAAone laptop\r\nssh-ed25519 AAAAtwo work\r\n")) && Lines(after) == 3, "CRLF lines survive pairing again");
+
+        File.WriteAllBytes(file, Ascii("ssh-ed25519 AAAAone laptop"));
+        AuthorizedKeys.Add(file, line, body);
+        Check(Starts(File.ReadAllBytes(file), Ascii("ssh-ed25519 AAAAone laptop\n")), "no final newline keeps the last key whole");
+
+        File.Delete(file);
+        AuthorizedKeys.Add(file, line, body);
+        Check(File.ReadAllText(file) == line + "\n", "a first key makes the file");
+        File.Delete(file);
+    }
 
     /// HostLink with a stand-in for ssh: it logs its arguments, then either serves the Mac engine on stdio or fails
     /// the way ssh does without a key.

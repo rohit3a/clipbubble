@@ -128,24 +128,36 @@ final class PairingServer {
     }
 }
 
+/// ~/.ssh/authorized_keys, which holds keys that aren't ClipBubble's. Every line it doesn't own stays byte for byte:
+/// one invalid byte or a CRLF must never make the file read as empty, or the rewrite would drop the owner's keys.
 enum AuthorizedKeys {
     enum Failure: Error { case badKey }
 
+    static var file: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/authorized_keys") }
+
     /// Adds the phone's key, limited to running this app's relay: no shell, no forwarding, no terminal.
-    static func add(key: String, name: String) throws {
+    static func add(key: String, name: String, to file: URL = AuthorizedKeys.file) throws {
         let parts = key.split(separator: " ")
         guard parts.count == 2, parts[0] == "ssh-ed25519", parts[1].allSatisfy({ $0.isLetter || $0.isNumber || "+/=".contains($0) }),
               let exe = Bundle.main.executablePath, !exe.contains("'") else { throw Failure.badKey }
         let label = name.filter { $0.isLetter || $0.isNumber || $0 == " " || $0 == "-" }.prefix(40)
-        let ssh = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-        try FileManager.default.createDirectory(at: ssh, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let file = ssh.appendingPathComponent("authorized_keys")
-        var lines = ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         // Pairing the same phone again replaces its line, so a moved app gets a working path.
-        lines.removeAll { $0.contains(String(parts[1])) }
-        while lines.last == "" { lines.removeLast() }
-        lines.append("restrict,command=\"'\(exe)' --peer\" \(key) ClipBubble on \(label)")
-        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        var kept = try lines(of: file).filter { $0.range(of: Data(parts[1].utf8)) == nil }
+        while kept.last?.isEmpty == true { kept.removeLast() }
+        kept.append(Data("restrict,command=\"'\(exe)' --peer\" \(key) ClipBubble on \(label)".utf8))
+        try write(kept, to: file)
+    }
+
+    private static func lines(of file: URL) throws -> [Data] {
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return try Data(contentsOf: file).split(separator: 10, omittingEmptySubsequences: false).map { Data($0) }
+    }
+
+    private static func write(_ lines: [Data], to file: URL) throws {
+        // Written through a symlink, so a key file kept in dotfiles stays linked.
+        let target = file.resolvingSymlinksInPath()
+        try Data(lines.joined(separator: [10]) + [10]).write(to: target, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 }

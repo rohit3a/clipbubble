@@ -79,6 +79,57 @@ class Pairing(unittest.TestCase):
         self.assertEqual(lines[0], "ssh-ed25519 AAAAother laptop")
         self.assertEqual(len(lines), 2)
 
+    def test_a_byte_that_isnt_text_keeps_every_key(self):
+        self.ssh.mkdir(mode=0o700)
+        keys = self.ssh / "authorized_keys"
+        old = b"ssh-ed25519 AAAAone caf\xe9 laptop\nssh-ed25519 AAAAtwo work\n"
+        keys.write_bytes(old)
+        pairing.authorize(KEY, "iPhone")
+        self.assertTrue(keys.read_bytes().startswith(old))
+        self.assertEqual(keys.read_bytes().count(b"\n"), 3)
+
+    def test_crlf_lines_survive_pairing_again(self):
+        self.ssh.mkdir(mode=0o700)
+        keys = self.ssh / "authorized_keys"
+        mine = f"restrict,command=\"'old' --peer\" {KEY} ClipBubble on iPhone".encode()
+        keys.write_bytes(b"ssh-ed25519 AAAAone laptop\r\n" + mine + b"\r\nssh-ed25519 AAAAtwo work\r\n")
+        pairing.authorize(KEY, "iPhone")
+        lines = keys.read_bytes().split(b"\n")
+        self.assertEqual(lines[:2], [b"ssh-ed25519 AAAAone laptop\r", b"ssh-ed25519 AAAAtwo work\r"])
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(sum(KEY.encode() in line for line in lines), 1)
+
+    def test_no_final_newline_keeps_the_last_key_whole(self):
+        self.ssh.mkdir(mode=0o700)
+        keys = self.ssh / "authorized_keys"
+        keys.write_bytes(b"ssh-ed25519 AAAAone laptop")
+        pairing.authorize(KEY, "iPhone")
+        self.assertEqual(keys.read_bytes().split(b"\n")[0], b"ssh-ed25519 AAAAone laptop")
+
+    def test_a_symlink_stays_a_symlink(self):
+        self.ssh.mkdir(mode=0o700)
+        target = self.ssh.parent / "dotfiles-keys"
+        target.write_bytes(b"ssh-ed25519 AAAAone laptop\n")
+        keys = self.ssh / "authorized_keys"
+        keys.symlink_to(target)
+        pairing.authorize(KEY, "iPhone")
+        self.assertTrue(keys.is_symlink())
+        self.assertEqual(target.read_bytes().count(b"\n"), 2)
+        self.assertIn(b"AAAAone", target.read_bytes())
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads anything")
+    def test_a_file_it_cant_read_is_left_alone(self):
+        self.ssh.mkdir(mode=0o700)
+        keys = self.ssh / "authorized_keys"
+        keys.write_bytes(b"ssh-ed25519 AAAAone laptop\n")
+        keys.chmod(0)
+        self.addCleanup(keys.chmod, 0o600)
+        with self.assertRaises(OSError):
+            pairing.authorize(KEY, "iPhone")
+        keys.chmod(0o600)
+        self.assertEqual(keys.read_bytes(), b"ssh-ed25519 AAAAone laptop\n")
+
     def test_refuses_anything_but_an_ed25519_key(self):
         for bad in ("ssh-rsa AAAA", KEY + " extra", "ssh-ed25519 AAAA\"; rm -rf ~", "ssh-ed25519 AAAA\nssh-ed25519 BBBB"):
             with self.assertRaises(ValueError):

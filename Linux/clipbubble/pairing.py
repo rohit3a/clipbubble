@@ -105,16 +105,25 @@ def authorize(key, name):
     label = "".join(ch for ch in name if ch.isalnum() or ch in " -")[:40]
     SSH_DIR.mkdir(mode=0o700, exist_ok=True)
     f = SSH_DIR / "authorized_keys"
-    lines = f.read_text().split("\n") if f.exists() else []
     # Pairing the same phone again replaces its line.
-    lines = [line for line in lines if parts[1] not in line]
-    while lines and lines[-1] == "":
+    lines = [line for line in _lines(f) if parts[1].encode() not in line]
+    while lines and lines[-1] == b"":
         lines.pop()
-    lines.append(f"restrict,command=\"'{exe}' --peer\" {key} ClipBubble on {label}")
-    tmp = f.with_name("authorized_keys.clipbubble")
-    tmp.write_text("\n".join(lines) + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, f)
+    lines.append(f"restrict,command=\"'{exe}' --peer\" {key} ClipBubble on {label}".encode())
+    _write(f, lines)
+
+
+def _lines(f):
+    """The file holds keys that aren't ClipBubble's, so lines stay bytes and every line it doesn't own stays exact."""
+    return f.read_bytes().split(b"\n") if f.exists() else []
+
+
+def _write(f, lines):
+    real = Path(os.path.realpath(f))  # through a symlink, so a key file kept in dotfiles stays linked
+    tmp = real.with_name(real.name + ".clipbubble")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
+        out.write(b"\n".join(lines) + b"\n")
+    os.replace(tmp, real)
 
 
 def host_key():

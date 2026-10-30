@@ -28,6 +28,7 @@ syncTests()
 storeTests()
 linkTests()
 boundaryTests()
+pairingTests()
 updaterTests()
 
 try? FileManager.default.removeItem(at: testHome)
