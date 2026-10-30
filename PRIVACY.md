@@ -1,6 +1,6 @@
 # ClipBubble privacy policy
 
-ClipBubble keeps your clipboard history on your own devices. It has no servers, no accounts, no analytics, no ads and no tracking, so nothing you copy is ever sent to us or to anyone else.
+ClipBubble keeps your clipboard history on your own devices. It has no servers, no accounts, no analytics, no ads and no tracking, so nothing you copy is ever sent to us. It goes only to the devices and AI agents you connect yourself.
 
 ## What ClipBubble stores
 
@@ -14,6 +14,10 @@ When you link devices, ClipBubble syncs your history directly between them over 
 
 ClipBubble on a computer asks GitHub whether a new version is out, which you can turn off in Settings. That request carries nothing from your clipboard. The iPhone app doesn't do this.
 
+## AI agents
+
+ClipBubble on a computer has an MCP server that AI agents can use. It runs only when an agent you connected starts it. That agent can read your history, and it may send what it reads to its AI provider under that provider's terms.
+
 ## iPhone permissions
 
 - **Camera** is used only to scan the pairing code your computer shows. No photo is taken or kept.
@@ -22,4 +26,4 @@ ClipBubble on a computer asks GitHub whether a new version is out, which you can
 
 ## Changes and contact
 
-If this policy changes, the new version will be posted here. For questions, open an issue at https://github.com/rohit3a/clipbubble/issues.
+The full policy is at https://clipbubble.krnl.studio/privacy. Questions: team@krnl.studio.
