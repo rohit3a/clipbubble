@@ -45,7 +45,7 @@ def write(shell, c):
     if c.kind == "image":
         d = png_data(c.file) if c.file else None
         return bool(d) and shell.set("image/png", d)
-    paths = [p for p in c.paths if os.path.exists(p)]
+    paths = [p for p in c.paths if os.path.isabs(p) and os.path.exists(p)]
     if not paths:
         return False
     # One image file goes on as its pixels, so it pastes into chat and web apps and through Live screen.

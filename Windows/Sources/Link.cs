@@ -304,6 +304,7 @@ sealed class Engine
         }
         if (db.ByHash(st.Hash) is not { } c || !db.Allowed(c.Kind.Name(), c.Source) || EntryFor(c) is not { } e) return;
         s.Known[st.Hash] = st;
+        if (e.Blobs.Count > 0) s.Fetchable.Add(st.Hash);
         if (c.Origin.Length == 0 && Now - c.Time < 10) sentAt[st.Hash] = Now;
         s.Send(e);
     }
@@ -330,7 +331,7 @@ sealed class Engine
     }
 
     static List<string> BlobFiles(Clip c) =>
-        c.Kind == ClipKind.Image ? (c.File is { } f ? new List<string> { f } : new()) : c.Paths.Where(File.Exists).ToList();
+        c.Kind == ClipKind.Image ? (c.File is { } f ? new List<string> { f } : new()) : c.Paths.Where(p => Path.IsPathRooted(p) && File.Exists(p)).ToList();
 
     // MARK: Frames
 
@@ -388,8 +389,9 @@ sealed class Engine
                 }
                 break;
             case Fetch p:
-                var c = db.ByHash(p.Hash);
-                var files = c != null && !c.Remote ? BlobFiles(c) : new List<string>();
+                // A put on this link is the only way in, so naming a hash or a path reaches nothing else.
+                var c = s.Fetchable.Contains(p.Hash) ? db.ByHash(p.Hash) : null;
+                var files = c != null && !c.Remote && db.Allowed(c.Kind.Name(), c.Source) ? BlobFiles(c) : new List<string>();
                 if (p.Index >= files.Count || !s.Upload(p.Hash, p.Index, files[p.Index], p.Offset)) s.Send(new Cancel(p.Hash));
                 else WatchTransfers();
                 break;
@@ -457,8 +459,9 @@ sealed class Engine
                 break;
             default:
                 if (!db.Allowed(e.Kind, e.Source)) return;
-                db.Insert(e, e.Origin == Device ? "" : e.Origin);
-                if (e.Blobs.Count == 0 && fresh && db.ByHash(e.Hash) is { } added) ApplyNow(added, s);
+                var named = e.Kind == "file" ? e with { Text = string.Join("\n", e.Text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(SafeFileName)) } : e;
+                db.Insert(named, e.Origin == Device ? "" : e.Origin);
+                if (e.Kind == "text" && fresh && db.ByHash(e.Hash) is { } added) ApplyNow(added, s);
                 break;
         }
         // Still missing its bytes, whether new here or left over from a link that dropped mid-download.
@@ -735,6 +738,8 @@ sealed class Session(Stream input, Stream output, Engine engine)
     internal readonly Dictionary<string, Stamp> Known = new();
     /// Items the peer has bytes for that haven't come over yet, for Get and Send to.
     internal readonly Dictionary<string, Entry> Offered = new();
+    /// Items sent to the peer with bytes on this link: the only ones it may fetch. Known won't do, since the peer's summary fills it.
+    internal readonly HashSet<string> Fetchable = new();
     readonly FrameReader reader = new();
     readonly Dictionary<string, Download> downloads = new();
     readonly LinkedList<Download> pending = new();

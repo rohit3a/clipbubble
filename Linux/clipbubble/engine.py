@@ -3,6 +3,7 @@
 Engine state is touched only on the engine thread, which runs posted callables in order, like the Mac's serial
 queue. Each session has a reader thread and a writer thread; writes put control frames ahead of file chunks."""
 import collections
+import dataclasses
 import os
 import queue
 import shutil
@@ -286,6 +287,8 @@ class Engine:
         if e is None:
             return
         s.known[st.hash] = st
+        if e.blobs:
+            s.fetchable.add(st.hash)
         if not c.origin and time.time() - c.created < 10:
             self.sent_at[st.hash] = time.time()
         s.send((sync.PUT, e))
@@ -308,7 +311,7 @@ class Engine:
     def blob_files(self, c):
         if c.kind == "image":
             return [c.file] if c.file else []
-        return [p for p in c.paths if os.path.isfile(p)]
+        return [p for p in c.paths if os.path.isabs(p) and os.path.isfile(p)]
 
     # Frames
 
@@ -373,7 +376,9 @@ class Engine:
         elif code == sync.FETCH:
             h, index, offset = p
             c = self.db.clip(hash=h)
-            files = self.blob_files(c) if c and not c.remote else []
+            # A put on this link is the only way in, so naming a hash or a path reaches nothing else.
+            ok = h in s.fetchable and c and not c.remote and self.db.allowed(c.kind, c.source)
+            files = self.blob_files(c) if ok else []
             if index >= len(files) or not s.upload(h, index, files[index], offset):
                 s.send((sync.CANCEL, h))
             else:
@@ -436,8 +441,10 @@ class Engine:
         else:
             if not self.db.allowed(e.kind, e.source):
                 return
+            if e.kind == "file":
+                e = dataclasses.replace(e, text="\n".join(safe_file_name(n) for n in e.text.split("\n") if n))
             self.db.insert(e, "" if e.origin == self.device else e.origin)
-            if not e.blobs and fresh:
+            if e.kind == "text" and fresh:
                 self.apply_now(self.db.clip(hash=e.hash), s)
         # Still missing its bytes, whether new here or left over from a link that dropped mid-download.
         c = self.db.clip(hash=e.hash)
@@ -622,6 +629,9 @@ class Session:
         self.known = {}
         # Items the peer has bytes for that haven't come over yet, with their blob sizes, for Get and Send to.
         self.offered = {}
+        # Items sent to the peer with bytes on this link: the only ones it may fetch. `known` won't do, since the
+        # peer's summary fills it.
+        self.fetchable = set()
         self.reader = sync.FrameReader()
         self.downloads = {}
         self.pending = collections.deque()

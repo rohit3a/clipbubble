@@ -64,3 +64,11 @@ Each frame is a 4-byte big-endian length, then that many bytes, a 1-byte type an
 ## Received files
 
 Files land in `Downloads/ClipBubble/<device name>/`. Names lose path separators and leading dots, and a clash gets ` (2)`, ` (3)` and so on. A transfer resumes with `fetch` at the received length after a drop.
+
+## What a peer can reach
+
+A linked device reaches a file only by being offered it from history. Three rules hold that line, and `origin` plays no part in them, because a peer can claim any origin.
+
+1. A peer's text is names, never paths. A receiver reduces every line of a file `put` the way it reduces a received file's name before storing it. The only paths in history are ones the machine captured itself or placed after a download.
+2. A sender answers `fetch` only for a hash it sent in a `put` with blobs on this session, while the item is still in history, still has its bytes here, and its category is switched on. Anything else gets `cancel`, including a hash the peer listed in its `summary`. Peers have always fetched after a `put` on the same session, so older versions are unaffected.
+3. A sender reads only absolute paths, so a name left in history can't resolve against its working directory.

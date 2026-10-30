@@ -39,9 +39,9 @@ static class Program
         }
     }
 
-    static void Check(bool ok, string what) { if (!ok) throw new Exception(what); }
+    internal static void Check(bool ok, string what) { if (!ok) throw new Exception(what); }
 
-    static bool WaitFor(Func<bool> cond, double seconds = 10)
+    internal static bool WaitFor(Func<bool> cond, double seconds = 10)
     {
         var end = DateTime.UtcNow.AddSeconds(seconds);
         while (DateTime.UtcNow < end) { if (cond()) return true; Thread.Sleep(50); }
@@ -229,6 +229,7 @@ static class Program
             Check(Engine.SafeFileName("ok name.pdf") == "ok name.pdf", "normal names stay");
         }),
 
+        ("a peer reaches only what it was offered", Boundary.Run),
         ("a live session with the Mac engine", SwiftPeer),
         ("--peer relays ssh to the running app", RelayToApp),
         ("a host link runs ssh and says how it's doing", HostLinkStates),
