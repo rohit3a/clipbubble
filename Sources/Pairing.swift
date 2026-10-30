@@ -151,6 +151,22 @@ enum AuthorizedKeys {
         try write(kept, to: file)
     }
 
+    /// The phones linked to this computer, by the name each one gave and the key that identifies it.
+    static func phones(in file: URL = AuthorizedKeys.file) -> [(name: String, key: String)] {
+        ((try? lines(of: file)) ?? []).compactMap { line in
+            let text = String(decoding: line, as: UTF8.self)
+            guard text.hasPrefix("restrict,command="), let r = text.range(of: " ClipBubble on ") else { return nil }
+            let fields = text[..<r.lowerBound].split(separator: " ")
+            guard fields.count >= 2, fields[fields.count - 2] == "ssh-ed25519" else { return nil }
+            return (String(text[r.upperBound...]), String(fields[fields.count - 1]))
+        }
+    }
+
+    /// Takes a phone's line out, leaving every other line as it was.
+    static func remove(key: String, from file: URL = AuthorizedKeys.file) throws {
+        try write(try lines(of: file).filter { $0.range(of: Data(key.utf8)) == nil }, to: file)
+    }
+
     private static func lines(of file: URL) throws -> [Data] {
         guard FileManager.default.fileExists(atPath: file.path) else { return [] }
         return try Data(contentsOf: file).split(separator: 10, omittingEmptySubsequences: false).map { Data($0) }
@@ -159,6 +175,8 @@ enum AuthorizedKeys {
     private static func write(_ lines: [Data], to file: URL) throws {
         // Written through a symlink, so a key file kept in dotfiles stays linked.
         let target = file.resolvingSymlinksInPath()
+        var lines = lines
+        while lines.last?.isEmpty == true { lines.removeLast() }
         try Data(lines.joined(separator: [10]) + [10]).write(to: target, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }

@@ -21,6 +21,11 @@ func pairingTests() {
     check(starts(Data("ssh-ed25519 AAAAone laptop\r\nssh-ed25519 AAAAtwo work\r\n".utf8)) && lines().count == 4, "and pairing again keeps them")
     check(lines().filter { $0.range(of: Data(body.utf8)) != nil }.count == 1, "the phone's line is replaced, not doubled")
 
+    check(AuthorizedKeys.phones(in: file).map(\.name) == ["iPhone"], "the linked phone is listed by name, and other keys aren't")
+    check((try? AuthorizedKeys.remove(key: AuthorizedKeys.phones(in: file)[0].key, from: file)) != nil, "unlinking works")
+    check(AuthorizedKeys.phones(in: file).isEmpty, "the phone is gone")
+    check(starts(Data("ssh-ed25519 AAAAone laptop\r\nssh-ed25519 AAAAtwo work\r\n".utf8)), "and every other key stays, unchanged")
+
     try? Data("ssh-ed25519 AAAAone laptop".utf8).write(to: file)
     try? AuthorizedKeys.add(key: key, name: "iPhone", to: file)
     check(lines().first == Data("ssh-ed25519 AAAAone laptop".utf8), "no final newline keeps the last key whole")

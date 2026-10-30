@@ -148,6 +148,11 @@ final class SyncEngine {
         }
     }
 
+    /// A phone just lost its key. Which session was its isn't known, so all of them drop and the others link again.
+    func dropPhones() {
+        queue.async { [self] in sessions.filter { $0.peer?.os == "ios" }.forEach { $0.close() } }
+    }
+
     func setPaused(_ paused: Bool) {
         Platform.defaults.set(paused, forKey: "sync.paused")
         queue.async { [self] in

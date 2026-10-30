@@ -99,6 +99,16 @@ class Pairing(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertEqual(sum(KEY.encode() in line for line in lines), 1)
 
+    def test_unlinking_removes_only_that_phone(self):
+        self.ssh.mkdir(mode=0o700, exist_ok=True)
+        f = self.ssh / "authorized_keys"
+        f.write_bytes(b"ssh-ed25519 AAAAone laptop\r\n")
+        pairing.authorize(KEY, "Rohit's iPhone")
+        self.assertEqual([n for n, _ in pairing.phones()], ["Rohits iPhone"])
+        pairing.unlink(pairing.phones()[0][1])
+        self.assertEqual(pairing.phones(), [])
+        self.assertEqual(f.read_bytes(), b"ssh-ed25519 AAAAone laptop\r\n")
+
     def test_no_final_newline_keeps_the_last_key_whole(self):
         self.ssh.mkdir(mode=0o700)
         keys = self.ssh / "authorized_keys"

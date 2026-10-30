@@ -954,6 +954,7 @@ struct PhonePairing: View {
     @State private var server: PairingServer?
     @State private var qr: NSImage?
     @State private var note: String?
+    @State private var phones: [(name: String, key: String)] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -970,9 +971,27 @@ struct PhonePairing: View {
                 Image(nsImage: qr).interpolation(.none).resizable().frame(width: 150, height: 150)
                     .padding(8).background(Color.white, in: RoundedRectangle(cornerRadius: 8)).padding(.leading, 30)
             }
+            ForEach(phones, id: \.key) { p in
+                HStack {
+                    Text(p.name).font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 30)
+                    Spacer(minLength: 8)
+                    Button("Unlink") { unlink(p.key) }.controlSize(.small)
+                }
+            }
         }
         .padding(.vertical, 5)
+        .onAppear { phones = AuthorizedKeys.phones() }
         .onDisappear(perform: stop)
+    }
+
+    private func unlink(_ key: String) {
+        do {
+            try AuthorizedKeys.remove(key: key)
+            SyncEngine.shared.dropPhones()
+            phones = AuthorizedKeys.phones()
+        } catch {
+            note = "Couldn't unlink it: \(error.localizedDescription)"
+        }
     }
 
     private func start() {
@@ -983,7 +1002,7 @@ struct PhonePairing: View {
         }
         let s = PairingServer()
         s.onReady = { qr = PairingServer.qr($0); note = "Scan with the iPhone's Camera, or in ClipBubble on the iPhone. Same Wi-Fi as this Mac." }
-        s.onPaired = { name in qr = nil; server = nil; note = "Linked \(name). It syncs whenever ClipBubble is open there." }
+        s.onPaired = { name in qr = nil; server = nil; phones = AuthorizedKeys.phones(); note = "Linked \(name). It syncs whenever ClipBubble is open there." }
         server = s
         s.start()
     }

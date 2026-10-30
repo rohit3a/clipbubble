@@ -112,6 +112,10 @@ class Engine:
     def post(self, fn):
         self.q.put(fn)
 
+    def drop_phones(self):
+        """A phone just lost its key. Which session was its isn't known, so all of them drop and the others link again."""
+        self.post(lambda: [s.close() for s in list(self.sessions) if s.peer and s.peer.os == "ios"])
+
     # Hosts
 
     def start(self):

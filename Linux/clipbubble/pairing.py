@@ -113,6 +113,27 @@ def authorize(key, name):
     _write(f, lines)
 
 
+def phones():
+    """The phones linked to this computer, as (name, key)."""
+    out = []
+    for line in _lines(SSH_DIR / "authorized_keys"):
+        text = line.decode(errors="replace")
+        head, _, name = text.partition(" ClipBubble on ")
+        fields = head.split(" ")
+        if name and text.startswith("restrict,command=") and len(fields) >= 2 and fields[-2] == "ssh-ed25519":
+            out.append((name, fields[-1]))
+    return out
+
+
+def unlink(key):
+    """Takes a phone's line out, leaving every other line as it was."""
+    f = SSH_DIR / "authorized_keys"
+    lines = [line for line in _lines(f) if key.encode() not in line]
+    while lines and lines[-1] == b"":
+        lines.pop()
+    _write(f, lines)
+
+
 def _lines(f):
     """The file holds keys that aren't ClipBubble's, so lines stay bytes and every line it doesn't own stays exact."""
     return f.read_bytes().split(b"\n") if f.exists() else []
