@@ -2076,7 +2076,7 @@ sealed class App : Application
         model.PrefsChanged = () => { SyncScreenshots(); SyncDownloads(); ImportFolders(); };
         model.ShowError = (title, reason) => Modal(() => Alert.Show(panel, title, reason, "OK", cancel: null));
 
-        capture = new Capture(model.Writer, Captured);
+        capture = new Capture(model.Writer, copied => { if (copied) Captured(); else RefreshLists(); });
         StartSync();
         SyncScreenshots();
         SyncDownloads();
@@ -2450,8 +2450,8 @@ sealed class App : Application
     {
         if (!pulseOnly)
         {
-            model.ReloadRecent();
-            if (panel.IsVisible) model.Reload(); else model.Unseen++;
+            RefreshLists();
+            if (!panel.IsVisible) model.Unseen++;
         }
         pulse = true;
         RefreshMood();
@@ -2461,6 +2461,13 @@ sealed class App : Application
         pulseWork = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.1) };
         pulseWork.Tick += (_, _) => { pulseWork.Stop(); pulse = false; RefreshMood(); RestBubble(); };
         pulseWork.Start();
+    }
+
+    /// History changed, but there's nothing new to announce.
+    void RefreshLists()
+    {
+        model.ReloadRecent();
+        if (panel.IsVisible) model.Reload();
     }
 
     void RestBubble()

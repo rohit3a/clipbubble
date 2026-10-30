@@ -15,7 +15,7 @@ enum Platform {
     }
 
     static func apply(_ c: Clip) {
-        DispatchQueue.main.async { if Board.write(c) { Capture.ignoreChange(NSPasteboard.general.changeCount) } }
+        DispatchQueue.main.async { if Board.write(c) { Capture.ignoreChange(NSPasteboard.general.changeCount, hash: c.hash) } }
     }
 
     static func listen(_ engine: SyncEngine) -> AnyObject? { PeerServer(engine: engine) }

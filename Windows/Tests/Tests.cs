@@ -187,6 +187,79 @@ static class Program
             Check(db.Clips().Any(c => c.Text == "C"), "C kept after 2.5 s");
         }),
 
+        ("recorder: picking the previous item right after a copy keeps the copy, and isn't a new one", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            r.Record(Text("A"), "Notepad", t0);
+            r.Record(Text("B"), "Edge", t0.AddSeconds(5));
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            var a = "t:" + Store.Sha("A");
+            Recorder.Expect(a, a);
+            Check(r.Record(Text("A"), "Notepad", t0.AddSeconds(6.5), ours: true), "the pick moves A up");
+            Check(r.Quiet, "and doesn't count as a copy");
+            using var db = new Db();
+            Check(db.Clips().Select(c => c.Text).SequenceEqual(new[] { "A", "B" }), "B kept: " + string.Join(",", db.Clips().Select(c => c.Text)));
+            Check(Sql.Query(Paths.Db, "SELECT count(*) FROM forgotten")[0] == "0", "and no delete goes out to linked devices");
+            System.Threading.Thread.Sleep(20);
+            Check(r.Record(Text("B"), "Edge", t0.AddSeconds(7)) && !r.Quiet, "copying B again right after counts");
+            Check(db.Clips()[0].Text == "B", "and moves it up");
+        }),
+
+        ("recorder: a picked file from another machine moves up without counting as a copy", () =>
+        {
+            using var db = new Db();
+            db.Upsert(ClipKind.File, "/there/report.pdf", null, "Finder", "f:there");
+            db.Upsert(ClipKind.Text, "newer", null, "Notepad", "t:newer");
+            var r = new Recorder(new Db());
+            var here = new Snapshot(new[] { "/here/report.pdf" }, null, null, null);
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            Recorder.Expect("f:" + Store.Sha("/here/report.pdf"), "f:there");
+            Check(r.Record(here, "Explorer", DateTime.Now, ours: true), "the list changed");
+            Check(r.Quiet, "but nothing new was copied");
+            Check(db.Clips()[0].Hash == "f:there" && db.Clips().Count == 2, "the same row moved up");
+        }),
+
+        ("recorder: picking the last capture moves it above what synced since", () =>
+        {
+            using var db = new Db();
+            var r = new Recorder(new Db());
+            r.Record(Text("A"), "Notepad", DateTime.Now);
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            db.Upsert(ClipKind.Text, "synced", null, "Edge", "t:synced");
+            System.Threading.Thread.Sleep(20);
+            var a = "t:" + Store.Sha("A");
+            Recorder.Expect(a, a);
+            Check(r.Record(Text("A"), "Notepad", DateTime.Now, ours: true) && r.Quiet, "the list changed, quietly");
+            Check(db.Clips()[0].Text == "A", "A moved up");
+        }),
+
+        ("recorder: a paste-through right after a synced copy still rolls back", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            r.Record(Text("A"), "Notepad", t0);
+            r.Record(Text("B"), "Edge", t0.AddSeconds(5));
+            using var db = new Db();
+            var c = "t:" + Store.Sha("C");
+            db.Upsert(ClipKind.Text, "C", null, "Edge", c);
+            Recorder.Expect(c, null);
+            Check(!r.Record(Text("C"), "Edge", t0.AddSeconds(20), ours: true), "a synced copy landing is already in history");
+            r.Record(Text("tool text"), "Wispr Flow", t0.AddSeconds(25));
+            r.Record(Text("C"), "Edge", t0.AddSeconds(26));
+            Check(!db.Clips().Any(x => x.Text == "tool text"), "the tool's text is gone");
+        }),
+
+        ("recorder: only picks and undone paste-throughs are quiet", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            Check(r.Record(Text("agent"), "Code", t0, ours: true) && !r.Quiet, "ClipBubble's own clipboard write counts when nothing expected it: an agent's or a screenshot's");
+            Check(r.Record(Text("B"), "Wispr Flow", t0.AddSeconds(5)) && !r.Quiet, "a normal copy counts");
+            Check(r.Record(Text("agent"), "Code", t0.AddSeconds(6)), "the restore changes the list");
+            Check(r.Quiet, "but undoing a paste-through isn't a copy");
+        }),
+
         ("recorder: files first, URL+image is an image, text+image is text, blank is nothing", () =>
         {
             var png = TinyPng();

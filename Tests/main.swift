@@ -31,6 +31,7 @@ boundaryTests()
 sweepTests()
 pairingTests()
 updaterTests()
+bubbleTests()
 
 try? FileManager.default.removeItem(at: testHome)
 print("\(ran) checks, \(failures) failed")

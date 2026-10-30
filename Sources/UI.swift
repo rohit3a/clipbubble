@@ -183,6 +183,16 @@ func appIcon(_ name: String) -> NSImage? {
     return img
 }
 
+/// A display as the bubble and panel use it. Tests make their own, away from every real one, so a run stays off screen.
+struct Display {
+    let id: Int?
+    let frame: NSRect, visible: NSRect
+
+    static var real: [Display] {
+        NSScreen.screens.map { Display(id: $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int, frame: $0.frame, visible: $0.visibleFrame) }
+    }
+}
+
 /// Hosting view that takes the first click even when its window isn't key.
 final class ClickThroughHostingView<V: View>: NSHostingView<V> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -391,10 +401,10 @@ struct Row: View, Equatable {
             if !clip.remote {
                 Button("Paste") { model.pick(clip, true) }
                 Button("Copy") { model.pick(clip, false) }
-            }
-            if !clip.remote, let p = clip.imagePath ?? clip.paths.first {
-                Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+                if let p = clip.imagePath ?? clip.paths.first {
+                    Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+                }
             }
             if clip.remote && transfer == nil {
                 Button("Get from \(model.devices[clip.origin] ?? "other device")") { SyncEngine.shared.get(clip.hash) }
@@ -1101,8 +1111,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var peekWork: DispatchWorkItem?
     private var dragging = false
     private var askedForAccessibility = false
+    /// Puts a clip on the clipboard and returns the change it made, or nil if it couldn't.
+    /// Tests swap it so they never touch the real clipboard.
+    var putOnClipboard: (Clip) -> Int? = { Board.write($0) ? NSPasteboard.general.changeCount : nil }
+    var displays: () -> [Display] = { Display.real }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        setUpWindows()
+        startServices()
+    }
+
+    /// The bubble, panel and peek. Tests stop here, so they start no capture, sync or global shortcuts, and pass
+    /// `keyable: false` so a run can't take the keyboard, or lose its panel to a click you make somewhere else.
+    func setUpWindows(keyable: Bool = true) {
         UserDefaults.standard.register(defaults: ["copyScreenshots": true, "corner": "br"])
         model.db.prune()
         model.reload()
@@ -1131,7 +1152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bubble.alphaValue = Self.idleAlpha
         bubble.orderFrontRegardless()
 
-        panel = FloatingPanel(size: NSSize(width: 420, height: 470), keyable: true)
+        panel = FloatingPanel(size: NSSize(width: 420, height: 470), keyable: keyable)
         panel.contentView = hosted(PanelView(model: model), size: NSSize(width: 420, height: 470), radius: 16)
 
         peek = FloatingPanel(size: NSSize(width: 300, height: 100), keyable: false)
@@ -1145,8 +1166,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.pick = { [weak self] c, paste in self?.pick(c, paste: paste) }
         model.dismiss = { [weak self] in self?.hidePanel() }
         model.hoverChanged = { [weak self] in self?.updatePeek() }
+    }
 
-        capture = Capture { [weak self] in DispatchQueue.main.async { self?.captured() } }
+    @MainActor private func startServices() {
+        capture = Capture { [weak self] copied in DispatchQueue.main.async { self?.clipboardChanged(copied: copied) } }
         // Before the folder watchers: a pending privacy prompt for a folder mustn't keep linked devices waiting.
         let sync = SyncEngine.shared
         sync.onReceived = { [weak self] in self?.captured() }
@@ -1263,16 +1286,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pick(_ c: Clip, paste: Bool) {
         // Still on another device: fetch it, as Get does.
         if c.remote { SyncEngine.shared.get(c.hash); return }
-        let written = Board.write(c)
+        let change = putOnClipboard(c)
+        if let change {
+            // It's already in history, so it moves up and keeps its source. Captured again, a file would become a second item.
+            Capture.ignoreChange(change, hash: c.hash)
+            model.db.bump(hash: c.hash, to: Date().timeIntervalSince1970)
+        }
         hidePanel()
         hidePeek()
         // Its image or files are gone: say so rather than paste whatever was copied before.
-        guard written else { NSSound.beep(); return }
-        // It's already in history, so it moves up and keeps its source. Captured again, a file would become a second item.
-        Capture.ignoreChange(NSPasteboard.general.changeCount)
-        model.db.bump(hash: c.hash, to: Date().timeIntervalSince1970)
-        model.reload()
-        model.reloadRecent()
+        guard change != nil else { NSSound.beep(); return }
+        refreshLists()
         guard paste, UserDefaults.standard.object(forKey: "autoPaste") as? Bool ?? true else { return }
         guard AXIsProcessTrusted() else {
             if !askedForAccessibility {
@@ -1321,11 +1345,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Corner magnet
 
+    /// The one it's mostly on: a drop can leave its center past the edge of every display.
+    private var bubbleDisplay: Display? {
+        func overlap(_ d: Display) -> CGFloat { let r = d.frame.intersection(bubble.frame); return r.width * r.height }
+        return displays().max { overlap($0) < overlap($1) }
+    }
+
     /// Moves the bubble to the nearest screen corner (or the saved one when not dragging), with a little overshoot.
     private func snap(animated: Bool) {
         let center = NSPoint(x: bubble.frame.midX, y: bubble.frame.midY)
-        let screen = (animated ? NSScreen.screens.first { $0.frame.contains(center) } : nil) ?? bubble.screen ?? NSScreen.main
-        guard let area = screen?.visibleFrame else { return }
+        guard let area = bubbleDisplay?.visible else { return }
         var corner = UserDefaults.standard.string(forKey: "corner") ?? "br"
         if animated {
             corner = (center.y > area.midY ? "t" : "b") + (center.x > area.midX ? "r" : "l")
@@ -1344,11 +1373,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, completionHandler: { [weak self] in self?.restBubble() })
     }
 
+    /// History changed, but there's nothing new to announce.
+    private func refreshLists() {
+        model.reloadRecent()
+        if panel.isVisible { model.reload() }
+        if peek.isVisible { resizePeek() }
+    }
+
+    func clipboardChanged(copied: Bool) {
+        guard copied else { return refreshLists() }
+        captured()
+    }
+
     /// The mascot hops and the bubble flashes opaque whenever something is captured.
     private func captured() {
-        model.reloadRecent()
-        if panel.isVisible { model.reload() } else { model.unseen += 1 }
-        if peek.isVisible { resizePeek() }
+        refreshLists()
+        if !panel.isVisible { model.unseen += 1 }
         model.pulse = true
         model.pulseTicks += 1
         bubble.animator().alphaValue = 1
@@ -1383,7 +1423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.selection = model.clips.first?.id
         model.unseen = 0
         let b = bubble.frame
-        let area = (bubble.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let area = bubbleDisplay?.visible ?? .zero
         let size = panel.frame.size
         var x = b.midX > area.midX ? b.maxX - size.width - 9 : b.minX + 9
         var y = b.midY > area.midY ? b.minY - size.height + 4 : b.maxY - 4
@@ -1398,6 +1438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.animator().alphaValue = 1
         }
         bubble.alphaValue = 1
+        guard panel.canBecomeKey else { return }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hidePanel()
         }
@@ -1426,7 +1467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func resizePeek() {
         let size = peekHost.fittingSize
         let b = bubble.frame
-        let area = (bubble.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let area = bubbleDisplay?.visible ?? .zero
         var x = b.midX > area.midX ? b.minX - size.width - 4 : b.maxX + 4
         var y = b.midY > area.midY ? b.maxY - 9 - size.height : b.minY + 9
         x = min(max(x, area.minX + 8), area.maxX - size.width - 8)
