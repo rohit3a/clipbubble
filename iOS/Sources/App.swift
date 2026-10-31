@@ -330,8 +330,13 @@ struct HistoryView: View {
                 }
             }
             if !model.transfers.isEmpty {
+                // A first link can queue hundreds, which would push the history off the screen.
+                let moving = model.transfers.sorted { ($0.value.fraction, $0.key) > ($1.value.fraction, $1.key) }
                 Section {
-                    ForEach(model.transfers.sorted { $0.key < $1.key }, id: \.key) { TransferRow(hash: $0.key, transfer: $0.value) }
+                    ForEach(moving.prefix(3), id: \.key) { TransferRow(hash: $0.key, transfer: $0.value) }
+                    if moving.count > 3 {
+                        Text("and \(moving.count - 3) more").font(.subheadline).foregroundStyle(.secondary)
+                    }
                 }
             }
             Section {
