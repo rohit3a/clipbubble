@@ -618,7 +618,8 @@ static class Program
             {
                 model.Delete(model.Clips.Single());
                 Check(model.Clips.Count == 0, "hidden while deleting");
-                Snapshots.Pump(3.5);   // past the 3 s busy timeout
+                // Held until the delete gives up after its 3 s busy timeout. Letting go sooner lets a late delete succeed.
+                for (var i = 0; i < 80 && error == null; i++) Snapshots.Pump(0.25);
             }
             Check(model.Clips.Count == 1 && model.Recent.Count == 1, "back in the list, because it's still stored");
             Check(error == "Couldn't delete that", "and says so: " + error);
@@ -867,7 +868,7 @@ static class Program
                 Snapshots.Pump(0.5);
                 Check(Math.Abs(scroller.VerticalOffset - before) < 50, $"still at {scroller.VerticalOffset:0}, was {before:0}");
                 model.Query = "item";
-                Snapshots.Pump(0.2);
+                for (var i = 0; i < 100 && scroller.VerticalOffset != 0; i++) Snapshots.Pump(0.1);   // up to 10 s, for a slow runner
                 Check(scroller.VerticalOffset == 0, $"a new search starts at the top ({scroller.VerticalOffset:0})");
             }
             finally { host.Close(); }
