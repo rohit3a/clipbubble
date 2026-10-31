@@ -16,14 +16,25 @@ enum Pairing {
         }
     }
 
+    /// What a pairing link says. Any web page can open one, so all of it is the sender's claim until you've said yes.
+    struct Link {
+        let hosts: [String], port: UInt16, code: String, name: String?
+
+        init?(_ url: URL) {
+            guard url.scheme == "clipbubble", url.host == "pair",
+                  let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                  let hosts = q.first(where: { $0.name == "h" })?.value?.split(separator: ",").map(String.init), !hosts.isEmpty,
+                  let port = q.first(where: { $0.name == "p" })?.value.flatMap(UInt16.init),
+                  let code = q.first(where: { $0.name == "c" })?.value else { return nil }
+            (self.hosts, self.port, self.code) = (hosts, port, code)
+            name = q.first(where: { $0.name == "n" })?.value
+        }
+    }
+
     /// Returns the new link's alias (`user@host`) and the computer's name.
-    static func pair(_ url: URL) async throws -> (alias: String, name: String) {
-        guard url.scheme == "clipbubble", url.host == "pair",
-              let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              let hosts = q.first(where: { $0.name == "h" })?.value?.split(separator: ",").map(String.init),
-              let port = q.first(where: { $0.name == "p" })?.value.flatMap(UInt16.init),
-              let code = q.first(where: { $0.name == "c" })?.value else { throw Failure.badLink }
-        var req = try JSONSerialization.data(withJSONObject: ["code": code, "key": Keys.publicKey, "name": Platform.deviceName])
+    static func pair(_ link: Link) async throws -> (alias: String, name: String) {
+        let (hosts, port) = (link.hosts, link.port)
+        var req = try JSONSerialization.data(withJSONObject: ["code": link.code, "key": Keys.publicKey, "name": Platform.deviceName])
         req.append(10)
         // Every address at once, so one a firewall drops costs nothing. The first (the .local name, which survives a
         // new IP address) gets a head start, since all of them reach the same computer.
@@ -61,8 +72,9 @@ enum Pairing {
         return SyncEngine.enabledHosts.filter { $0 != alias && key($0) == k }
     }
 
-    /// One line out, one line back, or nil if the host can't be reached within a few seconds. Once connected it waits
-    /// up to two minutes for the answer: Windows asks its user before adding the key.
+    /// One line out, one line back, or nil if the host can't be reached in 30 seconds, which leaves time to answer the
+    /// Local Network prompt on a first link. Once connected it waits up to two minutes for the answer: Windows asks its
+    /// user before adding the key.
     private static func exchange(host: String, port: UInt16, send: Data) async -> Data? {
         let c = NWConnection(host: .init(host), port: .init(rawValue: port)!, using: .tcp)
         return await withTaskCancellationHandler { await withCheckedContinuation { cont in
@@ -91,7 +103,7 @@ enum Pairing {
                 }
             }
             c.start(queue: q)
-            q.asyncAfter(deadline: .now() + 4) { if case .ready = c.state {} else { finish(nil) } }
+            q.asyncAfter(deadline: .now() + 30) { if case .ready = c.state {} else { finish(nil) } }
             q.asyncAfter(deadline: .now() + 120) { finish(nil) }
         } } onCancel: { c.cancel() }
     }

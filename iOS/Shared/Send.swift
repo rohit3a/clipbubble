@@ -38,6 +38,12 @@ enum Inbox {
         return hash
     }
 
+    /// `file`, then clears the temporary folder the item was kept in until now.
+    static func moved(_ temp: URL, source: String) -> String? {
+        defer { try? FileManager.default.removeItem(at: temp.deletingLastPathComponent()) }
+        return file(temp, source: source)
+    }
+
     /// Text, a link, a picture or a file from anything that hands over item providers: Paste and the share sheet.
     /// Pasted pictures become images, so they paste as pictures on the computer; shared ones keep their file.
     static func add(_ providers: [NSItemProvider], source: String, picturesAsFiles: Bool = false) async -> [String] {
@@ -54,11 +60,11 @@ enum Inbox {
             return url.isFileURL ? file(url, source: source) : text(url.absoluteString, source: source)
         }
         if let t = types.first(where: { $0.conforms(to: .image) }) {
-            if picturesAsFiles, let url = await fileCopy(p, t) { return file(url, source: source) }
+            if picturesAsFiles, let url = await fileCopy(p, t) { return moved(url, source: source) }
             if let d = await data(p, t) { return image(d, source: source) }
         }
         if p.canLoadObject(ofClass: String.self), let s = await object(p, String.self) { return text(s, source: source) }
-        if let t = types.first(where: { $0.conforms(to: .data) }), let url = await fileCopy(p, t) { return file(url, source: source) }
+        if let t = types.first(where: { $0.conforms(to: .data) }), let url = await fileCopy(p, t) { return moved(url, source: source) }
         return nil
     }
 
@@ -88,8 +94,8 @@ enum Inbox {
 /// ClipBubble itself isn't open. Runs on the main thread.
 @MainActor
 enum Courier {
-    /// Waits for a link, adds the items so they count as just copied, and returns once a computer has them on its
-    /// clipboard or `timeout` passes. Whatever didn't make it still syncs the next time ClipBubble opens.
+    /// Adds the items, waits for a link, and returns once a computer has them on its clipboard or `timeout` passes.
+    /// Whatever didn't make it still syncs the next time ClipBubble opens.
     static func deliver(timeout: Double = 25, status: @escaping (String) -> Void = { _ in },
                         add: @escaping () async -> [String]) async -> String {
         let engine = SyncEngine.shared
@@ -100,9 +106,16 @@ enum Courier {
         defer { engine.hold(false) }
         engine.start()
         status("Connecting…")
-        let linked = await until(seconds: 10) { engine.statuses.values.contains { $0.ok } }
+        // Saved before the wait, so you can walk away from the share sheet with nothing lost.
         let hashes = await add()
         guard !hashes.isEmpty else { return "Couldn't save that." }
+        let wasLinked = engine.statuses.values.contains { $0.ok }
+        let linked = await until(seconds: 10) { engine.statuses.values.contains { $0.ok } }
+        // A computer only takes what's just been copied onto its clipboard, so the wait mustn't count against it.
+        if linked, !wasLinked {
+            let now = Date().timeIntervalSince1970
+            hashes.forEach { DB().bump(hash: $0, to: now) }
+        }
         guard linked else {
             // Connecting or offline needs nothing from you; anything else (an untrusted host, a missing key) does.
             switch engine.statuses.values.first(where: { !$0.ok }) {

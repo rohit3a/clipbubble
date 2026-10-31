@@ -13,6 +13,7 @@ struct Clip: Identifiable, Hashable {
     var hash = ""
     var origin = ""           // device id it was synced from; empty when copied on this machine
     var remote = false        // its image or files haven't arrived from that device yet
+    var partial = false       // `text` is only the start of it; see DB.whole
 
     var paths: [String] { kind == "file" ? text.split(separator: "\n").map(String.init) : [] }
     var imagePath: String? { kind == "image" ? file : paths.first(where: isImagePath) }
@@ -40,7 +41,11 @@ final class DB {
     /// Called with the hashes of every insert, bump or delete, from any DB in this process. Sync sets it;
     /// it stays nil (and costs nothing) when no device is linked.
     static var changed: (([String]) -> Void)?
+    /// How much of a long text a list row holds.
+    static let previewLength = 1000
     private var h: OpaquePointer?
+
+    deinit { sqlite3_close_v2(h) }
 
     init() {
         // Clipboard history is private: keep the folder readable by this user only.
@@ -98,8 +103,11 @@ final class DB {
         sqlite3_finalize(s)
     }
 
-    private func select(_ tail: String, _ args: [Any?]) -> [Clip] {
-        let s = prepare("SELECT id,kind,text,file,source,created,hash,origin,remote FROM clips " + tail, args)
+    private func select(_ tail: String, _ args: [Any?], preview: Bool = false) -> [Clip] {
+        let n = Self.previewLength
+        let text = preview ? "CASE WHEN kind = 'text' THEN substr(text, 1, \(n)) ELSE text END" : "text"
+        let partial = preview ? "kind = 'text' AND length(text) > \(n)" : "0"
+        let s = prepare("SELECT id,kind,\(text),file,source,created,hash,origin,remote,\(partial) FROM clips " + tail, args)
         defer { sqlite3_finalize(s) }
         func col(_ i: Int32) -> String { sqlite3_column_text(s, i).map { String(cString: $0) } ?? "" }
         var out: [Clip] = []
@@ -107,7 +115,8 @@ final class DB {
             out.append(Clip(id: sqlite3_column_int64(s, 0), kind: col(1), text: col(2),
                             file: sqlite3_column_type(s, 3) == SQLITE_NULL ? nil : col(3),
                             source: col(4), created: Date(timeIntervalSince1970: sqlite3_column_double(s, 5)),
-                            hash: col(6), origin: col(7), remote: sqlite3_column_int(s, 8) != 0))
+                            hash: col(6), origin: col(7), remote: sqlite3_column_int(s, 8) != 0,
+                            partial: sqlite3_column_int(s, 9) != 0))
         }
         return out
     }
@@ -132,8 +141,9 @@ final class DB {
         if DB.changed != nil, sqlite3_changes(h) > 0 { DB.changed?([hash]) }
     }
 
+    /// `preview` trims long text for lists, which on iPhone can't hold thousands of megabyte-long items in memory.
     func clips(limit: Int = 300, kind: String? = nil, source: String? = nil,
-               query: String? = nil, sinceHours: Double? = nil) -> [Clip] {
+               query: String? = nil, sinceHours: Double? = nil, preview: Bool = false) -> [Clip] {
         var tail = "WHERE created >= ?"
         var args: [Any?] = [Date().timeIntervalSince1970 - (sinceHours.map { $0 * 3600 } ?? Self.retention)]
         if kind == "image" {
@@ -158,7 +168,13 @@ final class DB {
         tail += Prefs.hiddenSQL
         tail += " ORDER BY created DESC LIMIT ?"
         args.append(limit)
-        return select(tail, args)
+        let rows = select(tail, args, preview: preview)
+        // On iPhone a file's path is only the app's own folder, so its name is what a search means.
+        guard Platform.os == "ios", let query, !query.isEmpty else { return rows }
+        return rows.filter { c in
+            c.kind != "file" || c.source.localizedCaseInsensitiveContains(query)
+                || c.paths.contains { ($0 as NSString).lastPathComponent.localizedCaseInsensitiveContains(query) }
+        }
     }
 
     /// One clip by id. Items in categories switched off in Settings stay hidden here too (agents use this).
@@ -252,6 +268,9 @@ final class DB {
     }
 
     func clip(hash: String) -> Clip? { select("WHERE hash = ?", [hash]).first }
+
+    /// The full item behind a list row.
+    func whole(_ c: Clip) -> Clip { c.partial ? clip(hash: c.hash) ?? c : c }
 
     /// Whether a kind of item from a source would be shown, under the Settings switches.
     func allowed(kind: String, source: String) -> Bool {

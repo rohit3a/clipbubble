@@ -16,7 +16,7 @@ struct ClipMenu: View {
         Button(action: open) { Label("Open", systemImage: "arrow.up.left.and.arrow.down.right") }
         Button { model.copy(clip) } label: { Label("Copy", systemImage: "doc.on.doc") }
         if clip.remote {
-            Button { SyncEngine.shared.get(clip.hash) } label: { Label("Get from \(model.devices[clip.origin] ?? "computer")", systemImage: "icloud.and.arrow.down") }
+            Button { model.get(clip) } label: { Label("Get from \(model.devices[clip.origin] ?? "computer")", systemImage: "icloud.and.arrow.down") }
         } else {
             ClipShare(clip: clip)
         }
@@ -25,11 +25,12 @@ struct ClipMenu: View {
 }
 
 struct ClipShare: View {
+    @EnvironmentObject var model: Model
     let clip: Clip
 
     var body: some View {
         if clip.kind == "text" {
-            ShareLink(item: clip.text) { Label("Share", systemImage: "square.and.arrow.up") }
+            ShareLink(item: model.whole(clip).text) { Label("Share", systemImage: "square.and.arrow.up") }
         } else if let p = clip.file ?? clip.paths.first {
             ShareLink(item: URL(fileURLWithPath: p)) { Label("Share or Save", systemImage: "square.and.arrow.up") }
         }
@@ -61,6 +62,8 @@ struct ClipPreview: View {
 struct ClipDetail: View {
     @EnvironmentObject var model: Model
     @Environment(\.dismiss) private var dismiss
+    /// Text this long already takes a while to scroll, and a megabyte of it freezes the app.
+    private static let shownLength = 20_000
     private let item: Clip
     @State private var confirmDelete = false
 
@@ -72,6 +75,7 @@ struct ClipDetail: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let t = model.transfers[clip.hash] { TransferRow(hash: clip.hash, transfer: t).card() }
                 content
                 details
             }
@@ -98,16 +102,17 @@ struct ClipDetail: View {
             Button("Delete", role: .destructive) { model.delete(clip); dismiss() }
         }
         .safeAreaInset(edge: .bottom) {
-            Button { clip.remote ? SyncEngine.shared.get(clip.hash) : model.copy(clip) } label: {
+            Button { model.copy(clip) } label: {
                 Label(clip.remote ? "Get from \(device)" : "Copy", systemImage: clip.remote ? "icloud.and.arrow.down" : "doc.on.doc")
                     .font(.body.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 30)
             }
             .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
             .padding(.horizontal).padding(.bottom, 8)
         }
-        .toast(model.toast)
-        // Reads the item back whenever history changes, so the screen updates when Get brings it over.
-        .onReceive(model.$clips) { _ in live = DB().clip(hash: item.hash) ?? live }
+        .toast(model.line)
+        // Reads the item back whenever history changes, so the screen updates when Get brings it over. The first read
+        // also swaps the list's trimmed copy for the full item.
+        .onReceive(model.$clips) { _ in live = model.clip(item.hash) ?? live }
     }
 
     private var device: String { clip.origin.isEmpty ? "This iPhone" : model.devices[clip.origin] ?? "computer" }
@@ -117,8 +122,12 @@ struct ClipDetail: View {
             ZoomableImage(path: p)
         } else if clip.kind == "text" {
             VStack(alignment: .leading, spacing: 12) {
-                Text(clip.text).font(.body).textSelection(.enabled)
+                let shown = clip.text.prefix(Self.shownLength)
+                Text(String(shown)).font(.body).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if shown.endIndex < clip.text.endIndex {
+                    Text("Showing the start of it. Copy and Share take all of it.").font(.footnote).foregroundStyle(.secondary)
+                }
                 if clip.look == .link, let url = URL(string: clip.text.trimmingCharacters(in: .whitespacesAndNewlines)) {
                     Link(destination: url) { Label("Open link", systemImage: "safari") }.font(.body.weight(.medium))
                 }
@@ -201,6 +210,28 @@ extension Clip {
     var spoken: String {
         let what = kind == "text" ? String(text.prefix(300)) : kind == "image" ? "Image" : "File, \(names)"
         return remote ? "\(what), still on another device" : what
+    }
+}
+
+/// A file on its way, with how far along it is and a way to stop it.
+struct TransferRow: View {
+    let hash: String
+    let transfer: Transfer
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(transfer.sending ? "Sending to \(transfer.peer)" : "Getting from \(transfer.peer)")
+                    Spacer()
+                    Text(transfer.fraction, format: .percent.precision(.fractionLength(0))).monospacedDigit().foregroundStyle(.secondary)
+                }
+                .font(.subheadline)
+                ProgressView(value: transfer.fraction)
+            }
+            .accessibilityElement(children: .combine)
+            Button("Cancel") { SyncEngine.shared.cancelTransfer(hash) }.buttonStyle(.borderless).font(.subheadline)
+        }
     }
 }
 

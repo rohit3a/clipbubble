@@ -60,7 +60,7 @@ targets:
         # SSH runs on CryptoKit (swift-crypto ships no BoringSSL on iOS), so all encryption is the OS's own.
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: ClipBubble connects to your computers on this network to sync your clipboard.
-        NSCameraUsageDescription: To scan the code your Mac shows when you link this iPhone.
+        NSCameraUsageDescription: To scan the code your computer shows when you link this iPhone.
         CFBundleURLTypes:
           - CFBundleURLName: studio.krnl.clipbubble
             CFBundleURLSchemes: [clipbubble]
