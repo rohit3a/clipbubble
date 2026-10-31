@@ -24,7 +24,7 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerA
 2. Both sides send `summary`, every stamp from the last 7 days except items whose bytes haven't arrived yet. Leaving those out makes the peer send their `put` again, so a download cut off by a dropped link starts again on the next one.
 3. Each side sends `put` or `tombstone` for every hash where its stamp beats the peer's.
 4. From then on each side sends a `put` or `tombstone` whenever its history changes, unless the peer already has that stamp.
-5. Images and files move as `chunk` frames after a `fetch`. Items whose blobs total 25 MB or less are fetched whenever a `put` arrives for an item still missing its bytes, and bigger ones wait for the user to press Get on the receiving side or Send to on the sending side, which sends `offer`. A download cut off by a dropped link keeps its partial file and resumes from that offset.
+5. Images and files move as `chunk` frames after a `fetch`. Items whose blobs total 25 MB or less are fetched whenever a `put` arrives for an item still missing its bytes, and bigger ones wait for the user to press Get on the receiving side or Send to on the sending side, which sends `offer`. A download cut off by a dropped link keeps its partial file and resumes from that offset. A device sends a `put` for an image or file only once it holds the bytes, and sends it when they arrive, so a third device never gets an item nobody it's linked to can supply. A big item waiting for Get on a device in the middle goes no further until it's fetched there.
 
 A received item goes on the system clipboard only if it was copied less than 10 seconds ago on its origin's clock (corrected by the `hello` clock offset) and is newer than every local item. The receiver remembers that hash, so its own clipboard capture does not send it back.
 
@@ -64,3 +64,11 @@ Each frame is a 4-byte big-endian length, then that many bytes, a 1-byte type an
 ## Received files
 
 Files land in `Downloads/ClipBubble/<device name>/`. Names lose path separators and leading dots, and a clash gets ` (2)`, ` (3)` and so on. A transfer resumes with `fetch` at the received length after a drop.
+
+## What a peer can reach
+
+A linked device reaches a file only by being offered it from history. Three rules hold that line, and `origin` plays no part in them, because a peer can claim any origin.
+
+1. A peer's text is names, never paths. A receiver reduces every line of a file `put` the way it reduces a received file's name before storing it. The only paths in history are ones the machine captured itself or placed after a download.
+2. A sender answers `fetch` only for a hash it sent in a `put` with blobs on this session, while the item is still in history, still has its bytes here, and its category is switched on. Anything else gets `cancel`, including a hash the peer listed in its `summary`. Peers have always fetched after a `put` on the same session, so older versions are unaffected.
+3. A sender reads only absolute paths, so a name left in history can't resolve against its working directory. The same goes for writing a file to the clipboard.

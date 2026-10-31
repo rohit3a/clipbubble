@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -221,6 +222,7 @@ class DB:
         self._forget(rows)
         self._remove_files(rows)
         self.c.execute("DELETE FROM clips")
+        shutil.rmtree(DIR / "incoming", ignore_errors=True)
         _notify([c.hash for c in rows])
 
     def prune(self):
@@ -228,6 +230,19 @@ class DB:
         self._remove_files(self._select("WHERE created < ?", (cutoff,)))
         self.c.execute("DELETE FROM clips WHERE created < ?", (cutoff,))
         self.c.execute("DELETE FROM forgotten WHERE at < ?", (cutoff - 86400,))
+        self._sweep(cutoff)
+
+    def _sweep(self, cutoff):
+        """Images with no row, which older versions saved with Copied images off, and downloads cut off and never
+        resumed. Only ones older than the window, so a capture or a transfer in progress is safe."""
+        kept = {os.path.basename(c.file) for c in self._select("") if c.file}
+        for folder in (IMAGES, DIR / "incoming"):
+            for f in folder.glob("*"):
+                try:
+                    if f.name not in kept and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                except OSError:
+                    pass
 
     # Sync
 
@@ -283,6 +298,7 @@ class DB:
             self.c.execute("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", (text, hash))
         else:
             self.c.execute("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", (file, hash))
+        _notify([hash])
 
     def save_device(self, id, name, os_name):
         """Whether this was news: a device not seen before, or one with a new name."""

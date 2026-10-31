@@ -39,9 +39,9 @@ static class Program
         }
     }
 
-    static void Check(bool ok, string what) { if (!ok) throw new Exception(what); }
+    internal static void Check(bool ok, string what) { if (!ok) throw new Exception(what); }
 
-    static bool WaitFor(Func<bool> cond, double seconds = 10)
+    internal static bool WaitFor(Func<bool> cond, double seconds = 10)
     {
         var end = DateTime.UtcNow.AddSeconds(seconds);
         while (DateTime.UtcNow < end) { if (cond()) return true; Thread.Sleep(50); }
@@ -82,6 +82,30 @@ static class Program
 
     static IEnumerable<(string, Action)> All() => new (string, Action)[]
     {
+        ("prune clears old leftovers and nothing else", () =>
+        {
+            using var db = new Db();
+            var incoming = Path.Combine(Paths.Dir, "incoming");
+            Directory.CreateDirectory(incoming);
+            Directory.CreateDirectory(Paths.Images);
+            var kept = Path.Combine(Paths.Images, "kept.png");
+            db.Upsert(ClipKind.Image, "", kept, "Paint", "i:kept");
+            string leftover = Path.Combine(Paths.Images, "leftover.png"), recent = Path.Combine(Paths.Images, "recent.png"), partial = Path.Combine(incoming, "partial-0");
+            foreach (var f in new[] { leftover, kept, recent, partial })
+            {
+                File.WriteAllText(f, "x");
+                File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddDays(-30));
+            }
+            File.SetLastWriteTimeUtc(recent, DateTime.UtcNow);
+            db.Prune();
+            Check(!File.Exists(leftover) && !File.Exists(partial), "old leftovers go");
+            Check(File.Exists(kept) && File.Exists(recent), "an image with a row stays, and one too recent to judge");
+            File.Delete(recent);
+            File.WriteAllText(Path.Combine(incoming, "partial-0"), "x");
+            db.DeleteAll();
+            Check(!Directory.Exists(incoming), "Clear all takes partial downloads too");
+        }),
+
         ("QR codes match the ones a phone read", () =>
         {
             // Apple's Vision framework decoded each fixture when it was made, and Linux's encoder matches it too.
@@ -156,6 +180,7 @@ static class Program
         ("an older database gains the sync columns", () =>
         {
             var path = Paths.Db;
+            foreach (var f in new[] { path, path + "-wal", path + "-shm" }) File.Delete(f);
             using (var raw = new RawDb(path))
                 raw.Exec(@"CREATE TABLE clips(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
                            file TEXT, source TEXT NOT NULL DEFAULT '', hash TEXT UNIQUE NOT NULL, created REAL NOT NULL);
@@ -229,10 +254,41 @@ static class Program
             Check(Engine.SafeFileName("ok name.pdf") == "ok name.pdf", "normal names stay");
         }),
 
+        ("a peer reaches only what it was offered", Boundary.Run),
+        ("pairing leaves every other key in authorized_keys alone", PairingKeys),
         ("a live session with the Mac engine", SwiftPeer),
         ("--peer relays ssh to the running app", RelayToApp),
         ("a host link runs ssh and says how it's doing", HostLinkStates),
     };
+
+    static void PairingKeys()
+    {
+        var file = Path.Combine(Home, "authorized_keys");
+        const string body = "AAAAC3NzaC1lZDI1NTE5AAAAIPqR3mUOcskK0AMMwJekuAgZW350J";
+        var line = $"restrict,command=\"x --peer\" ssh-ed25519 {body} ClipBubble on iPhone";
+        byte[] Ascii(string s) => Encoding.ASCII.GetBytes(s);
+        bool Starts(byte[] a, byte[] b) => a.Take(b.Length).SequenceEqual(b);
+        int Lines(byte[] a) => a.Count(x => x == 10);
+
+        var old = Ascii("ssh-ed25519 AAAAone caf").Append((byte)0xE9).Concat(Ascii(" laptop\nssh-ed25519 AAAAtwo work\n")).ToArray();
+        File.WriteAllBytes(file, old);
+        AuthorizedKeys.Add(file, line, body);
+        Check(Starts(File.ReadAllBytes(file), old) && Lines(File.ReadAllBytes(file)) == 3, "a byte that isn't text keeps every key, unchanged");
+
+        File.WriteAllBytes(file, Ascii($"ssh-ed25519 AAAAone laptop\r\nrestrict ssh-ed25519 {body} ClipBubble on iPhone\r\nssh-ed25519 AAAAtwo work\r\n"));
+        AuthorizedKeys.Add(file, line, body);
+        var after = File.ReadAllBytes(file);
+        Check(Starts(after, Ascii("ssh-ed25519 AAAAone laptop\r\nssh-ed25519 AAAAtwo work\r\n")) && Lines(after) == 3, "CRLF lines survive pairing again");
+
+        File.WriteAllBytes(file, Ascii("ssh-ed25519 AAAAone laptop"));
+        AuthorizedKeys.Add(file, line, body);
+        Check(Starts(File.ReadAllBytes(file), Ascii("ssh-ed25519 AAAAone laptop\n")), "no final newline keeps the last key whole");
+
+        File.Delete(file);
+        AuthorizedKeys.Add(file, line, body);
+        Check(File.ReadAllText(file) == line + "\n", "a first key makes the file");
+        File.Delete(file);
+    }
 
     /// HostLink with a stand-in for ssh: it logs its arguments, then either serves the Mac engine on stdio or fails
     /// the way ssh does without a key.

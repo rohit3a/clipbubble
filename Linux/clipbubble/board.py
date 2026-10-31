@@ -3,10 +3,10 @@ import os
 from urllib.parse import quote, unquote, urlparse
 
 from .store import IMAGES, is_image_path, sha
+from .sync import MAX_TEXT
 
 TEXT_TYPES = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING"]
 SECRET_TYPES = {"x-kde-passwordManagerHint"}
-MAX_TEXT = 2_000_000
 
 
 def png_data(path):
@@ -45,7 +45,7 @@ def write(shell, c):
     if c.kind == "image":
         d = png_data(c.file) if c.file else None
         return bool(d) and shell.set("image/png", d)
-    paths = [p for p in c.paths if os.path.exists(p)]
+    paths = [p for p in c.paths if os.path.isabs(p) and os.path.exists(p)]
     if not paths:
         return False
     # One image file goes on as its pixels, so it pastes into chat and web apps and through Live screen.
@@ -55,6 +55,17 @@ def write(shell, c):
             return shell.set("image/png", d)
     uris = "\n".join("file://" + quote(p) for p in paths)
     return shell.set("x-special/gnome-copied-files", ("copy\n" + uris).encode())
+
+
+def same_picture(a, b):
+    """Whether two image files show the same pixels, however each was encoded."""
+    from gi.repository import GdkPixbuf
+    try:
+        x, y = (GdkPixbuf.Pixbuf.new_from_file(f).add_alpha(False, 0, 0, 0) for f in (a, b))
+    except Exception:
+        return False
+    return (x.get_width(), x.get_height()) == (y.get_width(), y.get_height()) \
+        and x.read_pixel_bytes().get_data() == y.read_pixel_bytes().get_data()
 
 
 def _file_paths(shell, mimes):
@@ -72,11 +83,11 @@ def _file_paths(shell, mimes):
 
 
 def read(shell, mimes):
-    """(kind, text, file, hash) for what's on the clipboard now, or None."""
+    """(kind, text, file, hash, png) for what's on the clipboard now, or None. An image isn't written anywhere yet."""
     paths = _file_paths(shell, mimes)
     if paths:
         joined = "\n".join(paths)
-        return ("file", joined, None, "f:" + sha(joined))
+        return ("file", joined, None, "f:" + sha(joined), None)
     raw = None
     for mime in TEXT_TYPES:
         if mime in mimes:
@@ -92,10 +103,7 @@ def read(shell, mimes):
         png = to_png(data, image) if data else None
         if png:
             h = sha(png)
-            path = IMAGES / (h + ".png")
-            if not path.exists():
-                path.write_bytes(png)
-            return ("image", "", str(path), "i:" + h)
+            return ("image", "", str(IMAGES / (h + ".png")), "i:" + h, png)
     if stripped and len(raw) <= MAX_TEXT:
-        return ("text", text, None, "t:" + sha(text))
+        return ("text", text, None, "t:" + sha(text), None)
     return None

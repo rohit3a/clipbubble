@@ -16,7 +16,8 @@ rm -rf "$app/clipbubble"
 mv "$app/clipbubble.new" "$app/clipbubble"
 cat > "$HOME/.local/bin/clipbubble" <<SH
 #!/bin/sh
-PYTHONPATH="$app" exec python3 -P -m clipbubble "\$@"
+# From its own folder, so a json.py in the folder you're in can't stand in for Python's. -P would do that, but needs 3.11.
+cd "$app" && PYTHONPATH="$app" exec python3 -m clipbubble "\$@"
 SH
 chmod 755 "$HOME/.local/bin/clipbubble"
 
@@ -39,14 +40,15 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user enable clipbubble.service >/dev/null 2>&1
   systemctl --user restart clipbubble.service
 else
-  pkill -u "$(id -u)" -f 'python3 -P -m clipbubble$' 2>/dev/null || true
+  pkill -u "$(id -u)" -f 'python3( -P)? -m clipbubble$' 2>/dev/null || true
 fi
 
 if gdbus call --session -d studio.krnl.ClipBubble.Shell -o /studio/krnl/ClipBubble/Shell \
      -m studio.krnl.ClipBubble.Shell.Version >/dev/null 2>&1; then
   echo "CLIPBUBBLE_READY"
 elif pgrep -u "$(id -u)" -x gnome-shell >/dev/null 2>&1; then
-  echo "CLIPBUBBLE_NEEDS_RELOGIN"
+  version=$(gnome-shell --version 2>/dev/null | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+  if grep -q "\"$version\"" "$ext/metadata.json"; then echo "CLIPBUBBLE_NEEDS_RELOGIN"; else echo "CLIPBUBBLE_OLD_GNOME"; fi
 else
   echo "CLIPBUBBLE_HEADLESS"
 fi

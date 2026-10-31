@@ -7,7 +7,7 @@ except ImportError:
     GLib = None
 
 from clipbubble import board
-from clipbubble.store import DB, sha
+from clipbubble.store import DB, IMAGES, Prefs, sha
 
 
 class FakeShell:
@@ -66,6 +66,25 @@ class CaptureRules(unittest.TestCase):
         self.shell.copy({"text/plain;charset=utf-8": synced.encode()}, ours=True)
         self.settle()
         self.assertFalse(self.db.exists("t:" + sha(synced)))
+
+    def test_copying_the_last_item_again_after_a_synced_one_counts(self):
+        t = f"mine {time.time()}"
+        self.shell.copy({"text/plain;charset=utf-8": t.encode()})
+        self.settle()
+        before = self.db.stamp("t:" + sha(t)).time
+        self.shell.copy({"text/plain;charset=utf-8": b"from the iPhone"}, ours=True)
+        self.settle()
+        self.shell.copy({"text/plain;charset=utf-8": t.encode()})
+        self.settle()
+        self.assertGreater(self.db.stamp("t:" + sha(t)).time, before)
+
+    def test_an_image_is_written_only_with_copied_images_on(self):
+        png = b"\x89PNG\r\n\x1a\n" + str(time.time()).encode()
+        Prefs.set("save.images", False)
+        self.addCleanup(Prefs.set, "save.images", True)
+        self.shell.copy({"image/png": png})
+        self.settle()
+        self.assertFalse((IMAGES / (sha(png) + ".png")).exists())
 
     def test_files_and_images(self):
         self.shell.copy({"x-special/gnome-copied-files": b"copy\nfile:///tmp/a%20b.txt\nfile:///tmp/c.pdf"})

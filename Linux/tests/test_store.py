@@ -1,3 +1,4 @@
+import os
 import time
 import unittest
 
@@ -63,3 +64,29 @@ class Store(unittest.TestCase):
         self.db.save_device("dev-2", "ROG", "linux")
         self.db.insert(Entry("t:r", time.time(), "text", "r", "Terminal", "dev-2"), "dev-2")
         self.assertEqual([c.hash for c in self.db.clips(source="rog")], ["t:r"])
+
+
+class Sweep(unittest.TestCase):
+    def test_prune_clears_old_leftovers_and_nothing_else(self):
+        db = DB()
+        incoming = store.DIR / "incoming"
+        incoming.mkdir(exist_ok=True)
+        store.IMAGES.mkdir(exist_ok=True)
+        old = time.time() - 30 * 86400
+        kept = store.IMAGES / "kept.png"
+        db.upsert("image", "", str(kept), "Preview", "i:kept")
+        self.addCleanup(db.delete, hash="i:kept")
+        files = {"leftover": store.IMAGES / "leftover.png", "kept": kept, "recent": store.IMAGES / "recent.png", "partial": incoming / "partial-0"}
+        for f in files.values():
+            f.write_bytes(b"x")
+            os.utime(f, (old, old))
+        os.utime(files["recent"], None)
+        db.prune()
+        self.assertFalse(files["leftover"].exists(), "an old image with no row goes")
+        self.assertFalse(files["partial"].exists(), "and an old partial download")
+        self.assertTrue(files["kept"].exists(), "an image with a row stays")
+        self.assertTrue(files["recent"].exists(), "and one too recent to judge")
+        files["recent"].unlink()
+        (incoming / "partial-0").write_bytes(b"x")
+        db.delete_all()
+        self.assertFalse(incoming.exists(), "Clear all takes partial downloads too")

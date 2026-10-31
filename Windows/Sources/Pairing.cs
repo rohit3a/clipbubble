@@ -17,6 +17,45 @@ namespace ClipBubble;
 
 sealed class PairingException(string message) : Exception(message);
 
+/// authorized_keys holds keys that aren't ClipBubble's. Every line it doesn't own stays byte for byte, because decoding
+/// the file as text would rewrite any line that isn't valid UTF-8.
+static class AuthorizedKeys
+{
+    public static void Add(string file, string line, string keyBody)
+    {
+        var lines = Lines(file).Where(l => !Has(l, keyBody)).ToList();
+        while (lines.Count > 0 && lines[lines.Count - 1].Length == 0) lines.RemoveAt(lines.Count - 1);
+        lines.Add(Encoding.UTF8.GetBytes(line));
+        Write(file, lines);
+    }
+
+    static List<byte[]> Lines(string file)
+    {
+        var lines = new List<byte[]>();
+        if (!File.Exists(file)) return lines;
+        var data = File.ReadAllBytes(file);
+        var start = 0;
+        for (var i = 0; i <= data.Length; i++)
+        {
+            if (i < data.Length && data[i] != 10) continue;
+            lines.Add(data.Skip(start).Take(i - start).ToArray());
+            start = i + 1;
+        }
+        return lines;
+    }
+
+    static bool Has(byte[] line, string text) => Encoding.ASCII.GetString(line).Contains(text);
+
+    /// To a temp file first, so a full disk fails before the keys are touched. Replace keeps the file's ACL, which sshd checks.
+    static void Write(string file, List<byte[]> lines)
+    {
+        var tmp = file + ".clipbubble";
+        File.WriteAllBytes(tmp, lines.SelectMany(l => l.Append((byte)10)).ToArray());
+        if (File.Exists(file)) File.Replace(tmp, file, null);
+        else File.Move(tmp, file);
+    }
+}
+
 /// Links an iPhone without a terminal, as the Mac (Sources/Pairing.swift) and Linux do. The QR code carries this PC's
 /// addresses and a one-time code. The phone sends its SSH key back over the local network, and the key goes where
 /// OpenSSH Server reads it, allowed to run only ClipBubble's relay.
@@ -158,9 +197,7 @@ sealed class Pairing
         try
         {
             Directory.CreateDirectory(dir);
-            var lines = File.Exists(file) ? File.ReadAllLines(file).Where(l => l.Length > 0 && !l.Contains(keyBody)).ToList() : new List<string>();
-            lines.Add(line);
-            File.WriteAllText(file, string.Join("\n", lines) + "\n", new UTF8Encoding(false));
+            AuthorizedKeys.Add(file, line, keyBody);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

@@ -352,7 +352,7 @@ class App(Gtk.Application):
             # GNOME already put the screenshot on the clipboard; keep only the file in history.
             newest = self.db.clips(limit=2)
             for c in newest:
-                if c.kind == "image" and time.time() - self.last_image_capture < 5:
+                if c.kind == "image" and time.time() - self.last_image_capture < 5 and board.same_picture(c.file, p):
                     self.db.delete(hash=c.hash)
             self.captured()
 
@@ -851,6 +851,21 @@ class App(Gtk.Application):
             l = Gtk.Label(label=text, xalign=0, wrap=True)
             l.add_css_class("dim")
             box.append(l)
+        for name, key in pairing.phones():
+            row = Gtk.Box(spacing=8)
+            row.append(Gtk.Label(label=name, xalign=0, hexpand=True))
+            b = Gtk.Button(label="Unlink")
+            b.connect("clicked", lambda _b, k=key: self.unlink_phone(k))
+            row.append(b)
+            box.append(row)
+
+    def unlink_phone(self, key):
+        try:
+            pairing.unlink(key)
+            self.engine.drop_phones()
+        except OSError as e:
+            self.pair_state = (None, f"Couldn't unlink it: {e}")
+        self.show_pairing()
 
     def refresh_hosts(self):
         paused = bool(Prefs.get("sync.paused"))

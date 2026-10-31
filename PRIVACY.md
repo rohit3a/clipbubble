@@ -4,11 +4,15 @@ ClipBubble keeps your clipboard history on your own devices. It has no servers, 
 
 ## What ClipBubble stores
 
-ClipBubble saves what you copy (text, images, files, screenshots and downloads on a computer, and what you copy or share on an iPhone) in a database on that device. It deletes items after 7 days. On a computer you can switch off any kind of item in Settings, and deleting the app deletes its history.
+ClipBubble saves what you copy (text, images, files, screenshots and downloads on a computer, and what you copy or share on an iPhone) in a database on that device. It deletes items after 7 days. A file that arrives from another device is saved to `Downloads/ClipBubble` on a computer and stays there until you delete it. On a computer you can switch off any kind of item in Settings. Deleting the iPhone app deletes its history. On a computer, deleting the app leaves its data folder behind, so delete that too to remove your history.
 
 ## Syncing
 
-When you link your iPhone to a computer, ClipBubble syncs your history directly between your devices over your own network, using encrypted SSH connections. The data travels only between devices you linked yourself.
+When you link devices, ClipBubble syncs your history directly between them over encrypted SSH connections. The data travels only between devices you linked yourself.
+
+## Update check
+
+ClipBubble on a computer asks GitHub whether a new version is out, which you can turn off in Settings. That request carries nothing from your clipboard. The iPhone app doesn't do this.
 
 ## iPhone permissions
 

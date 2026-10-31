@@ -388,9 +388,11 @@ struct Row: View, Equatable {
         .onTapGesture { model.pick(clip, !NSEvent.modifierFlags.contains(.option)) }
         .onDrag { dragItem }
         .contextMenu {
-            Button("Paste") { model.pick(clip, true) }
-            Button("Copy") { model.pick(clip, false) }
-            if let p = clip.imagePath ?? clip.paths.first {
+            if !clip.remote {
+                Button("Paste") { model.pick(clip, true) }
+                Button("Copy") { model.pick(clip, false) }
+            }
+            if !clip.remote, let p = clip.imagePath ?? clip.paths.first {
                 Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
             }
@@ -853,7 +855,7 @@ struct SettingsView: View {
     private func clearAll() {
         let alert = NSAlert()
         alert.messageText = "Clear all clipboard history?"
-        alert.informativeText = "This removes every saved item and image. It can't be undone."
+        alert.informativeText = "This removes every saved item and image, here and on your linked devices. It can't be undone."
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { model.db.deleteAll(); model.reload(); model.reloadRecent() }
@@ -952,6 +954,7 @@ struct PhonePairing: View {
     @State private var server: PairingServer?
     @State private var qr: NSImage?
     @State private var note: String?
+    @State private var phones: [(name: String, key: String)] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -968,9 +971,27 @@ struct PhonePairing: View {
                 Image(nsImage: qr).interpolation(.none).resizable().frame(width: 150, height: 150)
                     .padding(8).background(Color.white, in: RoundedRectangle(cornerRadius: 8)).padding(.leading, 30)
             }
+            ForEach(phones, id: \.key) { p in
+                HStack {
+                    Text(p.name).font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 30)
+                    Spacer(minLength: 8)
+                    Button("Unlink") { unlink(p.key) }.controlSize(.small)
+                }
+            }
         }
         .padding(.vertical, 5)
+        .onAppear { phones = AuthorizedKeys.phones() }
         .onDisappear(perform: stop)
+    }
+
+    private func unlink(_ key: String) {
+        do {
+            try AuthorizedKeys.remove(key: key)
+            SyncEngine.shared.dropPhones()
+            phones = AuthorizedKeys.phones()
+        } catch {
+            note = "Couldn't unlink it: \(error.localizedDescription)"
+        }
     }
 
     private func start() {
@@ -981,7 +1002,7 @@ struct PhonePairing: View {
         }
         let s = PairingServer()
         s.onReady = { qr = PairingServer.qr($0); note = "Scan with the iPhone's Camera, or in ClipBubble on the iPhone. Same Wi-Fi as this Mac." }
-        s.onPaired = { name in qr = nil; server = nil; note = "Linked \(name). It syncs whenever ClipBubble is open there." }
+        s.onPaired = { name in qr = nil; server = nil; phones = AuthorizedKeys.phones(); note = "Linked \(name). It syncs whenever ClipBubble is open there." }
         server = s
         s.start()
     }
@@ -1169,8 +1190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard Prefs.on("screenshots") else { screenshots?.stop(); screenshots = nil; return }
         guard screenshots?.folder != folder else { return }
         screenshots?.stop()
-        screenshots = FolderWatcher(folder: folder, maxAge: 120,
-                                    include: { isImagePath($0.path) || ["mov", "mp4"].contains($0.pathExtension.lowercased()) }) { [weak self] url, date in
+        // A picture that lands on the Desktop isn't a screenshot. Only macOS marks its own, so a folder picked in Settings isn't held to that.
+        let markedOnly = folder == FolderWatcher.macOSScreenshotFolder
+        screenshots = FolderWatcher(folder: folder, maxAge: 120, include: {
+            isImagePath($0.path) ? !markedOnly || FolderWatcher.isScreenCapture($0) : ["mov", "mp4"].contains($0.pathExtension.lowercased())
+        }) { [weak self] url, date in
             self?.model.db.insertIfMissing(kind: "file", text: url.path, source: "Screenshot", hash: "f:" + sha(url.path), created: date)
             if UserDefaults.standard.bool(forKey: "copyScreenshots") { Board.writeFiles([url]) } else { self?.captured() }
         }
@@ -1237,11 +1261,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Puts the clip on the clipboard and, unless copying only, pastes it into the app underneath.
     private func pick(_ c: Clip, paste: Bool) {
+        // Still on another device: fetch it, as Get does.
+        if c.remote { SyncEngine.shared.get(c.hash); return }
         let written = Board.write(c)
         hidePanel()
         hidePeek()
         // Its image or files are gone: say so rather than paste whatever was copied before.
         guard written else { NSSound.beep(); return }
+        // It's already in history, so it moves up and keeps its source. Captured again, a file would become a second item.
+        Capture.ignoreChange(NSPasteboard.general.changeCount)
+        model.db.bump(hash: c.hash, to: Date().timeIntervalSince1970)
+        model.reload()
+        model.reloadRecent()
         guard paste, UserDefaults.standard.object(forKey: "autoPaste") as? Bool ?? true else { return }
         guard AXIsProcessTrusted() else {
             if !askedForAccessibility {

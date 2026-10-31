@@ -148,6 +148,11 @@ final class SyncEngine {
         }
     }
 
+    /// A phone just lost its key. Which session was its isn't known, so all of them drop and the others link again.
+    func dropPhones() {
+        queue.async { [self] in sessions.filter { $0.peer?.os == "ios" }.forEach { $0.close() } }
+    }
+
     func setPaused(_ paused: Bool) {
         Platform.defaults.set(paused, forKey: "sync.paused")
         queue.async { [self] in
@@ -241,6 +246,7 @@ final class SyncEngine {
         }
         guard let c = db.clip(hash: st.hash), db.allowed(kind: c.kind, source: c.source), let e = entry(c) else { return }
         s.known[st.hash] = st
+        if !e.blobs.isEmpty { s.fetchable.insert(st.hash) }
         // Only fresh copies get acked, so only they are timed.
         if c.origin.isEmpty, Date().timeIntervalSince(c.created) < 10 { sentAt[st.hash] = Date().timeIntervalSince1970 }
         s.send(.put(e))
@@ -255,10 +261,11 @@ final class SyncEngine {
             guard c.text.utf8.count <= Sync.maxText else { return nil }
             e.text = c.text
         case "image":
-            guard !c.remote, let f = c.file, let size = fileSize(f) else { return c.remote ? e : nil }
+            // Offered before its bytes are here, an item is a dead end for every device after this one.
+            guard !c.remote, let f = c.file, let size = fileSize(f) else { return nil }
             e.blobs = [Blob(name: String(c.hash.dropFirst(2)) + ".png", size: size, sha: String(c.hash.dropFirst(2)))]
         default:
-            if c.remote { e.text = c.text; return e }
+            guard !c.remote else { return nil }
             let files = blobFiles(c)
             e.text = c.paths.map { ($0 as NSString).lastPathComponent }.joined(separator: "\n")
             e.blobs = files.compactMap { p in fileSize(p).map { Blob(name: (p as NSString).lastPathComponent, size: $0, sha: "") } }
@@ -269,7 +276,10 @@ final class SyncEngine {
     /// The files an item can send: regular files only, in order. Folders show by name but don't transfer.
     private func blobFiles(_ c: Clip) -> [String] {
         if c.kind == "image" { return c.file.map { [$0] } ?? [] }
-        return c.paths.filter { var dir: ObjCBool = false; return FileManager.default.fileExists(atPath: $0, isDirectory: &dir) && !dir.boolValue }
+        return c.paths.filter { p in
+            var dir: ObjCBool = false
+            return p.hasPrefix("/") && FileManager.default.fileExists(atPath: p, isDirectory: &dir) && !dir.boolValue
+        }
     }
 
     private func fileSize(_ p: String) -> Int64? {
@@ -323,8 +333,9 @@ final class SyncEngine {
                 notifyUI()
             }
         case .fetch(let hash, let index, let offset):
-            guard let c = db.clip(hash: hash), !c.remote, index < blobFiles(c).count,
-                  s.upload(hash: hash, index: index, path: blobFiles(c)[index], offset: offset) else {
+            // A `put` on this link is the only way in, so naming a hash or a path reaches nothing else.
+            guard s.fetchable.contains(hash), let c = db.clip(hash: hash), !c.remote, db.allowed(kind: c.kind, source: c.source),
+                  index < blobFiles(c).count, s.upload(hash: hash, index: index, path: blobFiles(c)[index], offset: offset) else {
                 s.send(.cancel(hash: hash))
                 return
             }
@@ -381,8 +392,10 @@ final class SyncEngine {
             if fresh, let c = db.clip(hash: e.hash), !c.remote { applyNow(c, to: s) }
         case .insert:
             guard db.allowed(kind: e.kind, source: e.source) else { return }
-            db.insert(e, origin: e.origin == device ? "" : e.origin)
-            if e.blobs.isEmpty, fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
+            var named = e
+            if e.kind == "file" { named.text = e.text.split(separator: "\n").map { safeFileName(String($0)) }.joined(separator: "\n") }
+            db.insert(named, origin: e.origin == device ? "" : e.origin)
+            if e.kind == "text", fresh, let c = db.clip(hash: e.hash) { applyNow(c, to: s) }
         }
         // Still missing its bytes, whether new here or left over from a link that dropped mid-download.
         if !e.blobs.isEmpty, db.clip(hash: e.hash)?.remote == true {
@@ -667,6 +680,8 @@ final class Session {
     var known: [String: Stamp] = [:]
     /// Items the peer has bytes for that haven't come over yet, with their blob sizes, for Get and Send to.
     var offered: [String: Entry] = [:]
+    /// Items sent to the peer with bytes on this link: the only ones it may fetch. `known` won't do, since the peer's summary fills it.
+    var fetchable: Set<String> = []
     private var reader = FrameReader()
     private var downloads: [String: Download] = [:]
     private var pendingDownloads: [Download] = []

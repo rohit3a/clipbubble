@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 PROTO = 1
 MAX_FRAME = 4 << 20
+MAX_TEXT = 2_000_000  # the longest text that goes in the history, well inside a frame
 CHUNK_SIZE = 256 << 10
 AUTO_FETCH_LIMIT = 25 << 20
 

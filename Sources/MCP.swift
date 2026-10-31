@@ -148,7 +148,7 @@ enum MCP {
         case "clipboard_set":
             if let t = a["text"] as? String { Board.writeText(t); return text("Copied text to the clipboard.") }
             guard let id = int("id"), let c = db.clip(id: id) else { return text("Pass text or a valid id.", error: true) }
-            guard Board.write(c) else { return text("Item #\(id)'s image or files no longer exist.", error: true) }
+            guard !c.remote, Board.write(c) else { return text("Item #\(id)'s image or files aren't on this Mac.", error: true) }
             return text("Copied item #\(id) to the clipboard.")
         case "mascot_list":
             let active = Mascots.activeID(), custom = Set(Mascots.custom().map(\.id))

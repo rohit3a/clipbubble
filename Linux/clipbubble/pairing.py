@@ -77,7 +77,7 @@ class Server:
         except (OSError, ValueError):
             return False
         reply, paired = {"ok": False}, False
-        if isinstance(req, dict) and hmac.compare_digest(str(req.get("code", "")), self.code) \
+        if isinstance(req, dict) and hmac.compare_digest(str(req.get("code", "")).encode(), self.code.encode()) \
                 and isinstance(req.get("key"), str) and isinstance(req.get("name"), str):
             try:
                 authorize(req["key"], req["name"])
@@ -105,16 +105,46 @@ def authorize(key, name):
     label = "".join(ch for ch in name if ch.isalnum() or ch in " -")[:40]
     SSH_DIR.mkdir(mode=0o700, exist_ok=True)
     f = SSH_DIR / "authorized_keys"
-    lines = f.read_text().split("\n") if f.exists() else []
     # Pairing the same phone again replaces its line.
-    lines = [line for line in lines if parts[1] not in line]
-    while lines and lines[-1] == "":
+    lines = [line for line in _lines(f) if parts[1].encode() not in line]
+    while lines and lines[-1] == b"":
         lines.pop()
-    lines.append(f"restrict,command=\"'{exe}' --peer\" {key} ClipBubble on {label}")
-    tmp = f.with_name("authorized_keys.clipbubble")
-    tmp.write_text("\n".join(lines) + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, f)
+    lines.append(f"restrict,command=\"'{exe}' --peer\" {key} ClipBubble on {label}".encode())
+    _write(f, lines)
+
+
+def phones():
+    """The phones linked to this computer, as (name, key)."""
+    out = []
+    for line in _lines(SSH_DIR / "authorized_keys"):
+        text = line.decode(errors="replace")
+        head, _, name = text.partition(" ClipBubble on ")
+        fields = head.split(" ")
+        if name and text.startswith("restrict,command=") and len(fields) >= 2 and fields[-2] == "ssh-ed25519":
+            out.append((name, fields[-1]))
+    return out
+
+
+def unlink(key):
+    """Takes a phone's line out, leaving every other line as it was."""
+    f = SSH_DIR / "authorized_keys"
+    lines = [line for line in _lines(f) if key.encode() not in line]
+    while lines and lines[-1] == b"":
+        lines.pop()
+    _write(f, lines)
+
+
+def _lines(f):
+    """The file holds keys that aren't ClipBubble's, so lines stay bytes and every line it doesn't own stays exact."""
+    return f.read_bytes().split(b"\n") if f.exists() else []
+
+
+def _write(f, lines):
+    real = Path(os.path.realpath(f))  # through a symlink, so a key file kept in dotfiles stays linked
+    tmp = real.with_name(real.name + ".clipbubble")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
+        out.write(b"\n".join(lines) + b"\n")
+    os.replace(tmp, real)
 
 
 def host_key():
@@ -133,7 +163,11 @@ def firewall_hint():
             return f"If the iPhone can't connect, let it through your firewall once: sudo ufw allow 22,{PORT}/tcp"
     except OSError:
         pass
-    if subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"], capture_output=True).returncode == 0:
+    try:
+        firewalld = subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"], capture_output=True).returncode == 0
+    except OSError:
+        firewalld = False
+    if firewalld:
         return (f"If the iPhone can't connect, let it through your firewall once: sudo firewall-cmd --permanent "
                 f"--add-service=ssh --add-port={PORT}/tcp && sudo firewall-cmd --reload")
     return None

@@ -6,6 +6,7 @@ import SystemConfiguration
 /// Links an iPhone without Terminal. The QR code carries this Mac's addresses and a one-time code; the phone sends its
 /// SSH key back over the local network, and the key goes into ~/.ssh/authorized_keys allowed to run only ClipBubble's relay.
 final class PairingServer {
+    private var expires = Date.distantPast
     private let code = (0..<16).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
     private let queue = DispatchQueue(label: "clipbubble.pairing")
     private var listener: NWListener?
@@ -17,6 +18,7 @@ final class PairingServer {
     func start() {
         guard let l = try? NWListener(using: .tcp, on: .any) else { return }
         listener = l
+        expires = Date().addingTimeInterval(600)
         l.newConnectionHandler = { [weak self] c in self?.serve(c) }
         l.stateUpdateHandler = { [weak self] state in
             guard case .ready = state, let self, let port = l.port?.rawValue else { return }
@@ -80,7 +82,7 @@ final class PairingServer {
     private func answer(_ line: Data, on c: NWConnection) {
         var reply: [String: Any] = ["ok": false]
         if let req = try? JSONSerialization.jsonObject(with: line) as? [String: String],
-           req["code"] == code,
+           req["code"] == code, Date() < expires,
            let key = req["key"], let name = req["name"] {
             do {
                 try AuthorizedKeys.add(key: key, name: name)
@@ -128,24 +130,54 @@ final class PairingServer {
     }
 }
 
+/// ~/.ssh/authorized_keys, which holds keys that aren't ClipBubble's. Every line it doesn't own stays byte for byte:
+/// one invalid byte or a CRLF must never make the file read as empty, or the rewrite would drop the owner's keys.
 enum AuthorizedKeys {
     enum Failure: Error { case badKey }
 
+    static var file: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/authorized_keys") }
+
     /// Adds the phone's key, limited to running this app's relay: no shell, no forwarding, no terminal.
-    static func add(key: String, name: String) throws {
+    static func add(key: String, name: String, to file: URL = AuthorizedKeys.file) throws {
         let parts = key.split(separator: " ")
         guard parts.count == 2, parts[0] == "ssh-ed25519", parts[1].allSatisfy({ $0.isLetter || $0.isNumber || "+/=".contains($0) }),
               let exe = Bundle.main.executablePath, !exe.contains("'") else { throw Failure.badKey }
         let label = name.filter { $0.isLetter || $0.isNumber || $0 == " " || $0 == "-" }.prefix(40)
-        let ssh = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-        try FileManager.default.createDirectory(at: ssh, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let file = ssh.appendingPathComponent("authorized_keys")
-        var lines = ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         // Pairing the same phone again replaces its line, so a moved app gets a working path.
-        lines.removeAll { $0.contains(String(parts[1])) }
-        while lines.last == "" { lines.removeLast() }
-        lines.append("restrict,command=\"'\(exe)' --peer\" \(key) ClipBubble on \(label)")
-        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        var kept = try lines(of: file).filter { $0.range(of: Data(parts[1].utf8)) == nil }
+        while kept.last?.isEmpty == true { kept.removeLast() }
+        kept.append(Data("restrict,command=\"'\(exe)' --peer\" \(key) ClipBubble on \(label)".utf8))
+        try write(kept, to: file)
+    }
+
+    /// The phones linked to this computer, by the name each one gave and the key that identifies it.
+    static func phones(in file: URL = AuthorizedKeys.file) -> [(name: String, key: String)] {
+        ((try? lines(of: file)) ?? []).compactMap { line in
+            let text = String(decoding: line, as: UTF8.self)
+            guard text.hasPrefix("restrict,command="), let r = text.range(of: " ClipBubble on ") else { return nil }
+            let fields = text[..<r.lowerBound].split(separator: " ")
+            guard fields.count >= 2, fields[fields.count - 2] == "ssh-ed25519" else { return nil }
+            return (String(text[r.upperBound...]), String(fields[fields.count - 1]))
+        }
+    }
+
+    /// Takes a phone's line out, leaving every other line as it was.
+    static func remove(key: String, from file: URL = AuthorizedKeys.file) throws {
+        try write(try lines(of: file).filter { $0.range(of: Data(key.utf8)) == nil }, to: file)
+    }
+
+    private static func lines(of file: URL) throws -> [Data] {
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return try Data(contentsOf: file).split(separator: 10, omittingEmptySubsequences: false).map { Data($0) }
+    }
+
+    private static func write(_ lines: [Data], to file: URL) throws {
+        // Written through a symlink, so a key file kept in dotfiles stays linked.
+        let target = file.resolvingSymlinksInPath()
+        var lines = lines
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        try Data(lines.joined(separator: [10]) + [10]).write(to: target, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 }

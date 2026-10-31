@@ -57,7 +57,7 @@ def run_app():
         display = gui is False and desktop_appeared()
         if display:
             os.environ["WAYLAND_DISPLAY"] = display
-            os.execv(sys.executable, [sys.executable, "-P", "-m", "clipbubble"])
+            os.execv(sys.executable, [sys.executable, "-m", "clipbubble"])
 
 
 def run_peer_stdio():

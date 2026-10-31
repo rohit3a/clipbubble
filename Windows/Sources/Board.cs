@@ -118,7 +118,7 @@ static class Board
     /// Of several files, only the ones still there go on.
     public static string? Write(Clip c)
     {
-        var files = c.Paths.Where(p => System.IO.File.Exists(p) || Directory.Exists(p)).ToList();
+        var files = c.Paths.Where(p => Engine.IsFullPath(p) && (System.IO.File.Exists(p) || Directory.Exists(p))).ToList();
         var data = c.Kind switch
         {
             ClipKind.Text => TextData(c.Text),

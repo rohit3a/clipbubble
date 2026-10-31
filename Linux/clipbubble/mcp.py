@@ -206,7 +206,10 @@ class Server:
             elif method == "tools/list":
                 self.reply(mid, {"tools": TOOLS})
             elif method == "tools/call":
-                self.reply(mid, self.call(params.get("name", ""), params.get("arguments") or {}))
+                try:
+                    self.reply(mid, self.call(params.get("name", ""), params.get("arguments") or {}))
+                except Exception as e:
+                    self.reply(mid, text(str(e), True))
             elif method == "ping":
                 self.reply(mid, {})
             else:

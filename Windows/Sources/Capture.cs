@@ -179,6 +179,9 @@ sealed class Recorder(Db db)
         if (Classify(s) is not { } clip) return false;
         if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5 && e.MoveUp != clip.Hash)
         {
+            // Sync or the panel replaced the last copy, so copying that again is a new copy.
+            last = null;
+            previousHash = null;
             if (e.MoveUp == null) return false;
             db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
             return true;
@@ -220,7 +223,7 @@ sealed class Recorder(Db db)
     record Classified(ClipKind Kind, string Text, string Hash, byte[]? Png);
 
     /// Text bigger than this (a log dump, a database export) isn't kept: it would slow every list and search.
-    public const int MaxTextBytes = 2_000_000;
+    public const int MaxTextBytes = SyncProto.MaxText;
 
     /// Same order as the Mac: files, then an image unless there's real text alongside it, then text.
     static Classified? Classify(Snapshot s)

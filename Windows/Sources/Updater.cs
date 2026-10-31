@@ -63,7 +63,7 @@ sealed class Updater
                 var r = Parse(Get(Latest));
                 Post(() => Set(IsNewer(r.Version, Engine.Version) ? new Available(r) : new Current()));
             }
-            catch (Exception e) when (e is WebException or IOException or FormatException or InvalidOperationException)
+            catch (Exception e) when (e is WebException or IOException or FormatException or InvalidOperationException or ArgumentException)
             {
                 if (!quietly) Post(() => Set(new Failed("Couldn't check for updates: " + e.Message)));
             }

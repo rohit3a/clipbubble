@@ -5,6 +5,7 @@ enum RemoteSetup {
     enum Result: Equatable {
         case ready
         case needsRelogin
+        case oldGNOME
         case headless
         case needsPython
         case otherOS(String)
@@ -14,6 +15,7 @@ enum RemoteSetup {
             switch self {
             case .ready: return "Installed. Copies sync both ways now."
             case .needsRelogin: return "Installed. Sending works now. Log out and back in there once so it can see copies made there."
+            case .oldGNOME: return "Installed. Sending works now, but seeing copies made there needs a newer GNOME."
             case .headless: return "Installed. History syncs; there's no desktop clipboard there."
             case .needsPython: return "Needs Python 3.8 or newer there."
             case .otherOS(let os): return "That's a \(os) machine: install ClipBubble there from the releases page."
@@ -93,6 +95,7 @@ enum RemoteSetup {
         if said.contains("CLIPBUBBLE_NEEDS_PYTHON") { return .needsPython }
         if said.contains("CLIPBUBBLE_READY") { return .ready }
         if said.contains("CLIPBUBBLE_NEEDS_RELOGIN") { return .needsRelogin }
+        if said.contains("CLIPBUBBLE_OLD_GNOME") { return .oldGNOME }
         if said.contains("CLIPBUBBLE_HEADLESS") { return .headless }
         let last = (errs + said).trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init)
         return .failed(last ?? "the installer exited with \(remote.terminationStatus)")

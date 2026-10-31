@@ -216,6 +216,7 @@ final class DB {
         forget(rows)
         removeFiles(rows)
         run("DELETE FROM clips")
+        try? FileManager.default.removeItem(at: Paths.dir.appendingPathComponent("incoming"))
         if !rows.isEmpty { DB.changed?(rows.map(\.hash)) }
     }
 
@@ -287,6 +288,7 @@ final class DB {
     func received(hash: String, file: String?, text: String?) {
         if let text { run("UPDATE clips SET remote = 0, text = ? WHERE hash = ?", text, hash) }
         else { run("UPDATE clips SET remote = 0, file = ? WHERE hash = ?", file, hash) }
+        DB.changed?([hash])
     }
 
     /// Whether this was news: a device not seen before, or one with a new name.
@@ -326,6 +328,21 @@ final class DB {
         run("DELETE FROM clips WHERE created < ?", cutoff)
         // A file older than the window is never re-imported, so the reminder can go a day after.
         run("DELETE FROM forgotten WHERE at < ?", cutoff - 86400)
+        sweep(before: cutoff)
+    }
+
+    /// Images with no row, which older versions saved with Copied images off, and downloads cut off and never resumed.
+    /// Only ones older than the window, so a capture or a transfer in progress is safe.
+    private func sweep(before cutoff: Double) {
+        let kept = Set(select("", []).compactMap { $0.file.map { ($0 as NSString).lastPathComponent } })
+        for dir in [Paths.images, Paths.dir.appendingPathComponent("incoming")] {
+            for f in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+                guard !kept.contains(f.lastPathComponent),
+                      let at = try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                      at.timeIntervalSince1970 < cutoff else { continue }
+                try? FileManager.default.removeItem(at: f)
+            }
+        }
     }
 }
 

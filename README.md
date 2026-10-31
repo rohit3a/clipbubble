@@ -31,7 +31,7 @@
 - **Paste without hunting.** Press <kbd>⌃⌥V</kbd> anywhere, type to search, and press <kbd>↩</kbd>: it pastes straight into the app you were in. Or drag any item out into Slack, Figma or a browser upload.
 - **Hover to peek** at your last three copies; one click pastes.
 - **Built-in MCP server.** Claude Code, Codex, Cursor and Claude Desktop can read your clipboard history (and actually see the images), put things on your clipboard, and design new mascots for you.
-- **Private and tiny.** Native Swift with zero dependencies. Everything lives in a local SQLite file, and nothing leaves your Mac apart from an update check with GitHub, which you can turn off. It skips password-manager copies and deletes everything after 7 days. It uses about 30 MB of RAM and 0% CPU at idle.
+- **Private and tiny.** Native Swift with zero dependencies. Everything lives in a local SQLite file. Nothing leaves your Mac apart from an update check with GitHub, which you can turn off, sync with devices you linked yourself, and what you let AI tools read over MCP. It skips password-manager copies and deletes its history after 7 days. A file another device sent you stays in `Downloads/ClipBubble` until you delete it. It uses about 30 MB of RAM and 0% CPU at idle.
 
 ## Install
 
@@ -54,9 +54,9 @@ git clone https://github.com/rohit3a/clipbubble && cd clipbubble && ./build.sh
 
 ## Windows
 
-The Windows version lives in [`Windows/`](Windows). It's a separate C# app with the same panel, mascots, history database and MCP tools. It needs Windows 10 22H2 or Windows 11 and nothing else. It runs on the .NET Framework that ships with Windows, as one 220 KB `ClipBubble.exe`.
+The Windows version lives in [`Windows/`](Windows). It's a separate C# app with the same panel, mascots, history database and MCP tools. It needs Windows 10 22H2 or Windows 11 and nothing else. It runs on the .NET Framework that ships with Windows, as one 360 KB `ClipBubble.exe`.
 
-**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it anywhere and run it. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**. After that it updates itself from **Settings → General → Update**.
+**Download:** grab `ClipBubble.exe` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), put it in `%LOCALAPPDATA%\Programs\ClipBubble` and run it. Anywhere works on its own, but other devices look for it there. It isn't signed, so the first launch shows SmartScreen: click **More info** → **Run anyway**. After that it updates itself from **Settings → General → Update**.
 
 **Or build from source** (needs the [.NET SDK](https://dotnet.microsoft.com/download)):
 
@@ -84,7 +84,7 @@ claude mcp add --scope user clipbubble -- "$env:LOCALAPPDATA\Programs\ClipBubble
 
 ## Linux
 
-The Linux version lives in [`Linux/`](Linux). It's a Python app with the same history database, sync and MCP tools, plus a small GNOME Shell extension that watches copies, shows the bubble and pastes. It needs Python 3.8 or later, and GNOME with GTK 4 for the panel, which Ubuntu and Fedora come with. Without a desktop it still syncs and serves MCP.
+The Linux version lives in [`Linux/`](Linux). It's a Python app with the same history database, sync and MCP tools, plus a small GNOME Shell extension that watches copies, shows the bubble and pastes. It needs Python 3.8 or later. The panel and bubble need GNOME 48 to 51 with GTK 4, so Ubuntu 25.04 or Fedora 42 or later. On an older desktop, or none, it still syncs and serves MCP. <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>V</kbd> opens the panel.
 
 **Download:** grab `ClipBubble-Linux.tar.gz` from [Releases](https://github.com/rohit3a/clipbubble/releases/latest), then run:
 
@@ -103,7 +103,11 @@ The iPhone app lives in [`iOS/`](iOS). It shows the history from your computers,
 - On Linux, the SSH server must be running (`sudo apt install openssh-server` on Ubuntu). If your firewall is on, let the iPhone through once with `sudo ufw allow 22,47821/tcp`.
 - The iPhone syncs while ClipBubble or its keyboard is open, because iOS doesn't let apps keep a connection in the background.
 
-**Install:** the app isn't on the App Store yet. To try it now, open `iOS/` in Xcode on a Mac and run it on your iPhone.
+**Install:** the app isn't on the App Store yet. To try it now, install [XcodeGen](https://github.com/yonaskolb/XcodeGen), run `xcodegen generate` in `iOS/`, open `ClipBubble.xcodeproj` in Xcode and run it on your iPhone.
+
+## Sync between computers
+
+Settings → Sync over SSH lists the hosts in your `~/.ssh/config`, with a switch for each. Turn one on, and your history and new copies go both ways over SSH, using your own keys and nothing else in between. Something you copy on one computer lands on the clipboard of the others. Files up to 25 MB come over on their own, and bigger ones wait for you to press Get. ClipBubble has to be installed on both sides, and Settings can set it up on a Linux host for you.
 
 ## Keys
 

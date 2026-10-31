@@ -1,6 +1,31 @@
 import Foundation
 import SQLite3
 
+func sweepTests() {
+    let db = DB(), fm = FileManager.default
+    let incoming = Paths.dir.appendingPathComponent("incoming")
+    try? fm.createDirectory(at: incoming, withIntermediateDirectories: true)
+    try? fm.createDirectory(at: Paths.images, withIntermediateDirectories: true)
+    let kept = Paths.images.appendingPathComponent("kept.png"), leftover = Paths.images.appendingPathComponent("leftover.png")
+    let recent = Paths.images.appendingPathComponent("recent.png"), partial = incoming.appendingPathComponent("partial-0")
+    db.upsert(kind: "image", text: "", file: kept.path, source: "Preview", hash: "i:kept")
+    let old = Date().addingTimeInterval(-30 * 86400)
+    for f in [kept, leftover, partial, recent] {
+        try? Data("x".utf8).write(to: f)
+        if f != recent { try? fm.setAttributes([.modificationDate: old], ofItemAtPath: f.path) }
+    }
+    db.prune()
+    check(!fm.fileExists(atPath: leftover.path), "prune clears an old image with no row")
+    check(!fm.fileExists(atPath: partial.path), "and an old partial download")
+    check(fm.fileExists(atPath: kept.path), "an image with a row stays")
+    check(fm.fileExists(atPath: recent.path), "and one too recent to judge")
+    try? fm.removeItem(at: recent)
+    db.delete(hash: "i:kept")
+    try? Data("x".utf8).write(to: partial)
+    db.deleteAll()
+    check(!fm.fileExists(atPath: incoming.path), "Clear all takes partial downloads too")
+}
+
 func storeTests() {
     // A 1.3.0 database upgrades in place and keeps every row.
     try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
