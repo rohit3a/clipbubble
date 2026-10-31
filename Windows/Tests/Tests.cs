@@ -618,7 +618,8 @@ static class Program
             {
                 model.Delete(model.Clips.Single());
                 Check(model.Clips.Count == 0, "hidden while deleting");
-                Snapshots.Pump(3.5);   // past the 3 s busy timeout
+                // Held until the delete gives up after its 3 s busy timeout. Letting go sooner lets a late delete succeed.
+                for (var i = 0; i < 80 && error == null; i++) Snapshots.Pump(0.25);
             }
             Check(model.Clips.Count == 1 && model.Recent.Count == 1, "back in the list, because it's still stored");
             Check(error == "Couldn't delete that", "and says so: " + error);
