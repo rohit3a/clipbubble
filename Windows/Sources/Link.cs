@@ -336,7 +336,9 @@ sealed class Engine
         c.Kind == ClipKind.Image ? (c.File is { } f ? new List<string> { f } : new()) : c.Paths.Where(p => IsFullPath(p) && File.Exists(p)).ToList();
 
     /// Path.IsPathRooted also accepts `\x` and `C:x`, which depend on the current folder. A network share is fine: only this machine puts one in a row.
-    internal static bool IsFullPath(string p) => Path.IsPathFullyQualified(p);
+    internal static bool IsFullPath(string p) =>
+        p.StartsWith(@"\\") || (p.Length > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
+        (Path.DirectorySeparatorChar == '/' && p.StartsWith("/"));   // the sync suite also runs on Mac and Linux
 
     // MARK: Frames
 
