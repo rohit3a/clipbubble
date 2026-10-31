@@ -37,11 +37,18 @@ final class Model: ObservableObject {
     @Published var linked: [Hello] = []
     @Published var mascot = Mascots.active()
     @Published var mascots = Mascots.all()
+    @Published var hideBubble = UserDefaults.standard.bool(forKey: "hideBubble") {
+        didSet { UserDefaults.standard.set(hideBubble, forKey: "hideBubble"); bubbleModeChanged() }
+    }
+    @Published var bubbleShortcut = Shortcut.saved() { didSet { bubbleShortcut.save(); bubbleModeChanged() } }
+    @Published var recordingShortcut = false { didSet { bubbleModeChanged() } }
+    @Published var shortcutNote: String?
     let db = DB()
     var pick: (Clip, _ paste: Bool) -> Void = { _, _ in }
     var dismiss: () -> Void = {}
     var hoverChanged: () -> Void = {}
     var prefsChanged: () -> Void = {}
+    var bubbleModeChanged: () -> Void = {}
 
     var selected: Clip? { clips.first { $0.id == selection } ?? clips.first }
 
@@ -91,6 +98,37 @@ final class Model: ObservableObject {
         if selection == c.id { selection = clips.isEmpty ? nil : clips[min(i, clips.count - 1)].id }
         reloadRecent()
     }
+}
+
+// MARK: - Shortcuts
+
+/// A global shortcut. `code` and `mods` are what Carbon registers; `label` is what the keyboard said when it was recorded.
+struct Shortcut: Codable, Equatable {
+    static let panel = Shortcut(code: UInt32(kVK_ANSI_V), mods: UInt32(controlKey | optionKey), label: "⌃⌥V")
+    static let bubble = Shortcut(code: UInt32(kVK_ANSI_B), mods: UInt32(controlKey | optionKey), label: "⌃⌥B")
+    var code: UInt32, mods: UInt32, label: String
+
+    static func == (a: Shortcut, b: Shortcut) -> Bool { a.code == b.code && a.mods == b.mods }
+
+    init(code: UInt32, mods: UInt32, label: String) { self.code = code; self.mods = mods; self.label = label }
+
+    /// Nil for keys that can't be a global shortcut: it needs ⌃ or ⌘ plus another modifier, so typing and ⌘C keep working.
+    init?(_ e: NSEvent) {
+        let held: [(NSEvent.ModifierFlags, Int, String)] = [(.control, controlKey, "⌃"), (.option, optionKey, "⌥"), (.shift, shiftKey, "⇧"), (.command, cmdKey, "⌘")]
+        let on = held.filter { e.modifierFlags.contains($0.0) }
+        guard on.count >= 2, e.modifierFlags.contains(.control) || e.modifierFlags.contains(.command) else { return nil }
+        let key = Int(e.keyCode) == kVK_Space ? "Space" : (e.charactersIgnoringModifiers ?? "").uppercased()
+        // Tab, Return, arrows and F-keys have no character a label could show.
+        let printable = CharacterSet.alphanumerics.union(.punctuationCharacters).union(.symbols)
+        guard !key.isEmpty, key.unicodeScalars.allSatisfy(printable.contains) else { return nil }
+        self.init(code: UInt32(e.keyCode), mods: on.reduce(0) { $0 | UInt32($1.1) }, label: on.map(\.2).joined() + key)
+    }
+
+    static func saved() -> Shortcut {
+        UserDefaults.standard.data(forKey: "bubbleHotkey").flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) } ?? .bubble
+    }
+
+    func save() { UserDefaults.standard.set(try? JSONEncoder().encode(self), forKey: "bubbleHotkey") }
 }
 
 // MARK: - Thumbnails
@@ -181,6 +219,16 @@ func appIcon(_ name: String) -> NSImage? {
     let img = NSWorkspace.shared.runningApplications.first { $0.localizedName == name }?.icon
     if let img { appIcons[name] = img }
     return img
+}
+
+/// A display as the bubble and panel use it. Tests make their own, away from every real one, so a run stays off screen.
+struct Display {
+    let id: Int?
+    let frame: NSRect, visible: NSRect
+
+    static var real: [Display] {
+        NSScreen.screens.map { Display(id: $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int, frame: $0.frame, visible: $0.visibleFrame) }
+    }
 }
 
 /// Hosting view that takes the first click even when its window isn't key.
@@ -391,10 +439,10 @@ struct Row: View, Equatable {
             if !clip.remote {
                 Button("Paste") { model.pick(clip, true) }
                 Button("Copy") { model.pick(clip, false) }
-            }
-            if !clip.remote, let p = clip.imagePath ?? clip.paths.first {
-                Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+                if let p = clip.imagePath ?? clip.paths.first {
+                    Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+                }
             }
             if clip.remote && transfer == nil {
                 Button("Get from \(model.devices[clip.origin] ?? "other device")") { SyncEngine.shared.get(clip.hash) }
@@ -631,6 +679,13 @@ struct SettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    section("Bubble") {
+                        toggleRow("eye.slash", "Hide bubble until needed", "Shows up when you copy something or press \(model.bubbleShortcut.label).",
+                                  isOn: $model.hideBubble)
+                        if model.hideBubble {
+                            row("keyboard", "Show or hide bubble", model.shortcutNote) { ShortcutBox(model: model) }
+                        }
+                    }
                     section("Save to history") {
                         ForEach(Prefs.categories.filter { !["screenshots", "downloads"].contains($0.key) }, id: \.key) { c in
                             toggleRow(c.icon, c.title, c.detail, isOn: Binding(
@@ -1014,6 +1069,23 @@ struct PhonePairing: View {
     }
 }
 
+/// Click, then press the new shortcut. Esc cancels.
+struct ShortcutBox: View {
+    @ObservedObject var model: Model
+
+    var body: some View {
+        Button(model.recordingShortcut ? "Press keys…" : model.bubbleShortcut.label) {
+            model.shortcutNote = nil
+            model.recordingShortcut.toggle()
+        }
+        .controlSize(.small)
+        .onDisappear {
+            model.shortcutNote = nil
+            if model.recordingShortcut { model.recordingShortcut = false }
+        }
+    }
+}
+
 struct Key: View {
     let keys: String, label: String
     var body: some View {
@@ -1086,6 +1158,8 @@ struct PeekView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let idleAlpha: CGFloat = 0.4
     private static let margin: CGFloat = 10
+    /// Seconds the bubble stays after the last thing that needed it, in Hide bubble until needed.
+    static var hideAfter: TimeInterval = 3
     let model = Model()
     private var bubble: FloatingPanel!
     private var panel: FloatingPanel!
@@ -1097,12 +1171,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     private var keyMonitor: Any?
     private var hotKey: EventHotKeyRef?
+    private var bubbleHotKey: EventHotKeyRef?
+    private var hotKeyHandler: EventHandlerRef?
     private var pulseWork: DispatchWorkItem?
     private var peekWork: DispatchWorkItem?
+    private var hideWork: DispatchWorkItem?
+    private var hiding = false
     private var dragging = false
     private var askedForAccessibility = false
+    /// Puts a clip on the clipboard and returns the change it made, or nil if it couldn't.
+    /// Tests swap it so they never touch the real clipboard.
+    var putOnClipboard: (Clip) -> Int? = { Board.write($0) ? NSPasteboard.general.changeCount : nil }
+    var displays: () -> [Display] = { Display.real }
+    var pointer: () -> NSPoint = { NSEvent.mouseLocation }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        setUpWindows()
+        startServices()
+    }
+
+    /// The bubble, panel and peek. Tests stop here, so they start no capture, sync or global shortcuts, and pass
+    /// `keyable: false` so a run can't take the keyboard, or lose its panel to a click you make somewhere else.
+    func setUpWindows(keyable: Bool = true) {
         UserDefaults.standard.register(defaults: ["copyScreenshots": true, "corner": "br"])
         model.db.prune()
         model.reload()
@@ -1127,11 +1217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.onDragEnd = { [weak self] in self?.dragging = false; self?.snap(animated: true) }
         view.onHover = { [weak self] in self?.model.bubbleHover = $0 }
         bubble.contentView = view
-        snap(animated: false)
+        snap(animated: false, on: savedDisplay)
         bubble.alphaValue = Self.idleAlpha
-        bubble.orderFrontRegardless()
+        if !model.hideBubble { bubble.orderFrontRegardless() }
 
-        panel = FloatingPanel(size: NSSize(width: 420, height: 470), keyable: true)
+        panel = FloatingPanel(size: NSSize(width: 420, height: 470), keyable: keyable)
         panel.contentView = hosted(PanelView(model: model), size: NSSize(width: 420, height: 470), radius: 16)
 
         peek = FloatingPanel(size: NSSize(width: 300, height: 100), keyable: false)
@@ -1145,18 +1235,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.pick = { [weak self] c, paste in self?.pick(c, paste: paste) }
         model.dismiss = { [weak self] in self?.hidePanel() }
         model.hoverChanged = { [weak self] in self?.updatePeek() }
+        model.bubbleModeChanged = { [weak self] in self?.bubbleModeChanged() }
+    }
 
-        capture = Capture { [weak self] in DispatchQueue.main.async { self?.captured() } }
+    @MainActor private func startServices() {
+        capture = Capture { [weak self] copied in DispatchQueue.main.async { self?.clipboardChanged(copied: copied) } }
         // Before the folder watchers: a pending privacy prompt for a folder mustn't keep linked devices waiting.
-        let sync = SyncEngine.shared
-        sync.onReceived = { [weak self] in self?.captured() }
-        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
-        sync.onTransfers = { [weak self] t in
-            let finished = self?.model.transfers.keys.contains { t[$0] == nil } ?? false
-            self?.model.transfers = t
-            if finished { self?.captured() }
-        }
-        sync.start()
+        connectSync()
+        SyncEngine.shared.start()
         Updater.shared.start()
         syncScreenshots()
         syncDownloads()
@@ -1184,6 +1270,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
     }
 
+    func connectSync() {
+        let sync = SyncEngine.shared
+        sync.apply = { [weak self] c in DispatchQueue.main.async { self?.applySynced(c) } }
+        sync.onReceived = { [weak self] in self?.refreshLists() }
+        sync.onNew = { [weak self] in self?.captured() }
+        sync.onStatus = { [weak self] in self?.model.links = sync.statuses; self?.model.linked = sync.linked }
+        sync.onTransfers = { [weak self] in self?.transfersChanged($0) }
+    }
+
+    /// A copy from another device goes on this clipboard. The bubble shows only if it got there.
+    private func applySynced(_ c: Clip) {
+        guard let change = putOnClipboard(c) else { return }
+        Capture.ignoreChange(change, hash: c.hash)
+        reveal()
+    }
+
     /// Every screenshot lands in history; copying it to the clipboard as well is optional.
     private func syncScreenshots() {
         let folder = FolderWatcher.screenshotFolder
@@ -1195,9 +1297,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         screenshots = FolderWatcher(folder: folder, maxAge: 120, include: {
             isImagePath($0.path) ? !markedOnly || FolderWatcher.isScreenCapture($0) : ["mov", "mp4"].contains($0.pathExtension.lowercased())
         }) { [weak self] url, date in
-            self?.model.db.insertIfMissing(kind: "file", text: url.path, source: "Screenshot", hash: "f:" + sha(url.path), created: date)
-            if UserDefaults.standard.bool(forKey: "copyScreenshots") { Board.writeFiles([url]) } else { self?.captured() }
+            self?.screenshotAdded(url, at: date)
         }
+    }
+
+    func screenshotAdded(_ url: URL, at date: Date) {
+        let hash = "f:" + sha(url.path)
+        model.db.insertIfMissing(kind: "file", text: url.path, source: "Screenshot", hash: hash, created: date)
+        // A copy to the clipboard is announced when capture saves it, unless copied files aren't saved.
+        let copy = UserDefaults.standard.bool(forKey: "copyScreenshots")
+        if !copy || !Prefs.on("files") { captured() }
+        if copy, let c = model.db.clip(hash: hash) { _ = putOnClipboard(c) }
     }
 
     /// Watches ~/Downloads only while that's switched on (so the privacy prompt only shows up if you want it).
@@ -1263,16 +1373,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pick(_ c: Clip, paste: Bool) {
         // Still on another device: fetch it, as Get does.
         if c.remote { SyncEngine.shared.get(c.hash); return }
-        let written = Board.write(c)
+        let change = putOnClipboard(c)
+        if let change {
+            // It's already in history, so it moves up and keeps its source. Captured again, a file would become a second item.
+            Capture.ignoreChange(change, hash: c.hash)
+            model.db.bump(hash: c.hash, to: Date().timeIntervalSince1970)
+        }
         hidePanel()
         hidePeek()
         // Its image or files are gone: say so rather than paste whatever was copied before.
-        guard written else { NSSound.beep(); return }
-        // It's already in history, so it moves up and keeps its source. Captured again, a file would become a second item.
-        Capture.ignoreChange(NSPasteboard.general.changeCount)
-        model.db.bump(hash: c.hash, to: Date().timeIntervalSince1970)
-        model.reload()
-        model.reloadRecent()
+        guard change != nil else { NSSound.beep(); return }
+        refreshLists()
         guard paste, UserDefaults.standard.object(forKey: "autoPaste") as? Bool ?? true else { return }
         guard AXIsProcessTrusted() else {
             if !askedForAccessibility {
@@ -1291,8 +1402,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func recordShortcut(_ e: NSEvent) {
+        if Int(e.keyCode) == kVK_Escape { model.recordingShortcut = false; return }
+        guard let s = Shortcut(e) else { model.shortcutNote = "Hold ⌃ or ⌘ with another modifier"; return }
+        model.shortcutNote = s == .panel ? "Taken, try another" : nil
+        if s != .panel { model.bubbleShortcut = s }
+        model.recordingShortcut = false
+    }
+
     private func handleKey(_ e: NSEvent) -> NSEvent? {
         guard panel.isKeyWindow else { return e }
+        if model.recordingShortcut { recordShortcut(e); return nil }
         if model.showSettings {
             if Int(e.keyCode) == kVK_Escape { model.showSettings = false; return nil }
             return e
@@ -1321,15 +1441,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Corner magnet
 
+    private var savedDisplay: Display? {
+        let id = UserDefaults.standard.object(forKey: "cornerDisplay") as? Int
+        return displays().first { $0.id == id }
+    }
+
+    /// The one it's mostly on: a drop can leave its center past the edge of every display.
+    private var bubbleDisplay: Display? {
+        func overlap(_ d: Display) -> CGFloat { let r = d.frame.intersection(bubble.frame); return r.width * r.height }
+        return displays().max { overlap($0) < overlap($1) }
+    }
+
     /// Moves the bubble to the nearest screen corner (or the saved one when not dragging), with a little overshoot.
-    private func snap(animated: Bool) {
+    private func snap(animated: Bool, on chosen: Display? = nil) {
         let center = NSPoint(x: bubble.frame.midX, y: bubble.frame.midY)
-        let screen = (animated ? NSScreen.screens.first { $0.frame.contains(center) } : nil) ?? bubble.screen ?? NSScreen.main
-        guard let area = screen?.visibleFrame else { return }
+        guard let display = chosen ?? bubbleDisplay else { return }
+        let area = display.visible
         var corner = UserDefaults.standard.string(forKey: "corner") ?? "br"
         if animated {
             corner = (center.y > area.midY ? "t" : "b") + (center.x > area.midX ? "r" : "l")
             UserDefaults.standard.set(corner, forKey: "corner")
+            UserDefaults.standard.set(display.id, forKey: "cornerDisplay")
         }
         let size = bubble.frame.size
         let target = NSRect(
@@ -1344,11 +1476,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, completionHandler: { [weak self] in self?.restBubble() })
     }
 
+    /// History changed, but there's nothing new to announce.
+    private func refreshLists() {
+        model.reloadRecent()
+        if panel.isVisible { model.reload() }
+        if peek.isVisible { resizePeek() }
+    }
+
+    func clipboardChanged(copied: Bool) {
+        guard copied else { return refreshLists() }
+        showBubble()
+        captured()
+    }
+
+    func transfersChanged(_ t: [String: Transfer]) {
+        let finished = model.transfers.keys.contains { t[$0] == nil }
+        model.transfers = t
+        if finished { refreshLists() }
+    }
+
     /// The mascot hops and the bubble flashes opaque whenever something is captured.
     private func captured() {
-        model.reloadRecent()
-        if panel.isVisible { model.reload() } else { model.unseen += 1 }
-        if peek.isVisible { resizePeek() }
+        refreshLists()
+        if !panel.isVisible { model.unseen += 1 }
+        pulse()
+    }
+
+    private func pulse() {
         model.pulse = true
         model.pulseTicks += 1
         bubble.animator().alphaValue = 1
@@ -1362,18 +1516,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: w)
     }
 
+    /// Worked out when asked, never stored. A press counts because the rim of the bubble takes clicks but isn't hover.
+    private var bubbleNeeded: Bool {
+        panel.isVisible || peek.isVisible || model.bubbleHover || model.pulse || dragging || model.pressed
+    }
+
+    /// Nothing needs the bubble now: dim it and, in Hide bubble until needed, start the countdown.
     private func restBubble() {
-        if !panel.isVisible && !peek.isVisible && !model.bubbleHover && !model.pulse && abs(bubble.alphaValue - Self.idleAlpha) > 0.01 {
-            bubble.animator().alphaValue = Self.idleAlpha
-        }
+        hideWork?.cancel()
+        guard !bubbleNeeded, bubble.isVisible, !hiding else { return }
+        if abs(bubble.alphaValue - Self.idleAlpha) > 0.01 { bubble.animator().alphaValue = Self.idleAlpha }
+        guard model.hideBubble else { return }
+        let w = DispatchWorkItem { [weak self] in self?.fadeBubble() }
+        hideWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hideAfter, execute: w)
+    }
+
+    private func fadeBubble() {
+        guard model.hideBubble, !bubbleNeeded, bubble.isVisible else { return }
+        hiding = true
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            bubble.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            // A fade that was overtaken still lands here, part way down. A reveal cleared `hiding`.
+            guard let self, self.hiding else { return }
+            self.hiding = false
+            if !self.bubbleNeeded { self.bubble.orderOut(nil) }
+        })
+    }
+
+    /// Back on screen but still see-through: whoever calls this sets how opaque. Hidden, it has no position to
+    /// jump from, so it comes back on the screen with the pointer.
+    private func showBubble() {
+        hideWork?.cancel()
+        hiding = false
+        guard !bubble.isVisible else { return }
+        let p = pointer()
+        snap(animated: false, on: displays().first { NSMouseInRect(p, $0.frame, false) })
+        bubble.alphaValue = 0
+        bubble.orderFrontRegardless()
+    }
+
+    func reveal() {
+        showBubble()
+        pulse()
+    }
+
+    /// The bubble's own shortcut. While it's showing, everything goes at once.
+    func toggleBubble() {
+        guard !dragging, !model.pressed else { return }
+        guard bubble.isVisible, !hiding else { return reveal() }
+        hidePanel()
+        hidePeek()
+        model.bubbleHover = false
+        pulseWork?.cancel()
+        model.pulse = false
+        hideWork?.cancel()
+        fadeBubble()
+    }
+
+    private func bubbleModeChanged() {
+        syncHotKeys()
+        if !model.hideBubble { showBubble() }
+        restBubble()
     }
 
     // MARK: Panel
 
     func toggle() { panel.isVisible ? hidePanel() : showPanel() }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !panel.isVisible { showPanel() }
+        return false
+    }
+
     /// Opens the panel anchored to the bubble's corner, growing toward the screen center.
     private func showPanel() {
+        showBubble()
         hidePeek()
         model.query = ""
         model.filter = "all"
@@ -1383,7 +1603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.selection = model.clips.first?.id
         model.unseen = 0
         let b = bubble.frame
-        let area = (bubble.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let area = bubbleDisplay?.visible ?? .zero
         let size = panel.frame.size
         var x = b.midX > area.midX ? b.maxX - size.width - 9 : b.minX + 9
         var y = b.midY > area.midY ? b.minY - size.height + 4 : b.maxY - 4
@@ -1398,6 +1618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.animator().alphaValue = 1
         }
         bubble.alphaValue = 1
+        guard panel.canBecomeKey else { return }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hidePanel()
         }
@@ -1406,6 +1627,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Instant, so a paste lands without waiting on an animation.
     private func hidePanel() {
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+        // orderOut doesn't count as disappearing to SwiftUI, and recording keeps both shortcuts off.
+        if model.recordingShortcut { model.recordingShortcut = false }
         guard panel.isVisible else { return }
         panel.orderOut(nil)
         restBubble()
@@ -1426,7 +1649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func resizePeek() {
         let size = peekHost.fittingSize
         let b = bubble.frame
-        let area = (bubble.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let area = bubbleDisplay?.visible ?? .zero
         var x = b.midX > area.midX ? b.minX - size.width - 4 : b.maxX + 4
         var y = b.midY > area.midY ? b.maxY - 9 - size.height : b.minY + 9
         x = min(max(x, area.minX + 8), area.maxX - size.width - 8)
@@ -1457,15 +1680,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restBubble()
     }
 
-    /// ⌃⌥V toggles the panel from anywhere.
+    /// ⌃⌥V toggles the panel from anywhere, and id 2 toggles the bubble.
     private func registerHotKey() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, ctx in
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, ctx in
             let me = Unmanaged<AppDelegate>.fromOpaque(ctx!).takeUnretainedValue()
-            DispatchQueue.main.async { me.toggle() }
+            var id = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &id)
+            let bubble = id.id == 2
+            DispatchQueue.main.async { bubble ? me.toggleBubble() : me.toggle() }
             return noErr
-        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
-        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(controlKey | optionKey),
-                            EventHotKeyID(signature: OSType(0x434C4950), id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &hotKeyHandler)
+        syncHotKeys()
+    }
+
+    /// The panel's shortcut always, the bubble's only in Hide bubble until needed, and neither during recording,
+    /// or the keys being pressed would act instead of reaching the recorder.
+    private func syncHotKeys() {
+        guard hotKeyHandler != nil else { return }
+        for r in [hotKey, bubbleHotKey] { if let r { UnregisterEventHotKey(r) } }
+        hotKey = nil
+        bubbleHotKey = nil
+        guard !model.recordingShortcut else { return }
+        let signature = OSType(0x434C4950), target = GetApplicationEventTarget()
+        RegisterEventHotKey(Shortcut.panel.code, Shortcut.panel.mods, EventHotKeyID(signature: signature, id: 1), target, 0, &hotKey)
+        guard model.hideBubble else { return }
+        let s = model.bubbleShortcut
+        RegisterEventHotKey(s.code, s.mods, EventHotKeyID(signature: signature, id: 2), target, 0, &bubbleHotKey)
     }
 }

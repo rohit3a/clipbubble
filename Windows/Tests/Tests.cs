@@ -187,6 +187,79 @@ static class Program
             Check(db.Clips().Any(c => c.Text == "C"), "C kept after 2.5 s");
         }),
 
+        ("recorder: picking the previous item right after a copy keeps the copy, and isn't a new one", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            r.Record(Text("A"), "Notepad", t0);
+            r.Record(Text("B"), "Edge", t0.AddSeconds(5));
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            var a = "t:" + Store.Sha("A");
+            Recorder.Expect(a, a);
+            Check(r.Record(Text("A"), "Notepad", t0.AddSeconds(6.5), ours: true), "the pick moves A up");
+            Check(r.Quiet, "and doesn't count as a copy");
+            using var db = new Db();
+            Check(db.Clips().Select(c => c.Text).SequenceEqual(new[] { "A", "B" }), "B kept: " + string.Join(",", db.Clips().Select(c => c.Text)));
+            Check(Sql.Query(Paths.Db, "SELECT count(*) FROM forgotten")[0] == "0", "and no delete goes out to linked devices");
+            System.Threading.Thread.Sleep(20);
+            Check(r.Record(Text("B"), "Edge", t0.AddSeconds(7)) && !r.Quiet, "copying B again right after counts");
+            Check(db.Clips()[0].Text == "B", "and moves it up");
+        }),
+
+        ("recorder: a picked file from another machine moves up without counting as a copy", () =>
+        {
+            using var db = new Db();
+            db.Upsert(ClipKind.File, "/there/report.pdf", null, "Finder", "f:there");
+            db.Upsert(ClipKind.Text, "newer", null, "Notepad", "t:newer");
+            var r = new Recorder(new Db());
+            var here = new Snapshot(new[] { "/here/report.pdf" }, null, null, null);
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            Recorder.Expect("f:" + Store.Sha("/here/report.pdf"), "f:there");
+            Check(r.Record(here, "Explorer", DateTime.Now, ours: true), "the list changed");
+            Check(r.Quiet, "but nothing new was copied");
+            Check(db.Clips()[0].Hash == "f:there" && db.Clips().Count == 2, "the same row moved up");
+        }),
+
+        ("recorder: picking the last capture moves it above what synced since", () =>
+        {
+            using var db = new Db();
+            var r = new Recorder(new Db());
+            r.Record(Text("A"), "Notepad", DateTime.Now);
+            System.Threading.Thread.Sleep(20);   // history orders by time, in milliseconds
+            db.Upsert(ClipKind.Text, "synced", null, "Edge", "t:synced");
+            System.Threading.Thread.Sleep(20);
+            var a = "t:" + Store.Sha("A");
+            Recorder.Expect(a, a);
+            Check(r.Record(Text("A"), "Notepad", DateTime.Now, ours: true) && r.Quiet, "the list changed, quietly");
+            Check(db.Clips()[0].Text == "A", "A moved up");
+        }),
+
+        ("recorder: a paste-through right after a synced copy still rolls back", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            r.Record(Text("A"), "Notepad", t0);
+            r.Record(Text("B"), "Edge", t0.AddSeconds(5));
+            using var db = new Db();
+            var c = "t:" + Store.Sha("C");
+            db.Upsert(ClipKind.Text, "C", null, "Edge", c);
+            Recorder.Expect(c, null);
+            Check(!r.Record(Text("C"), "Edge", t0.AddSeconds(20), ours: true), "a synced copy landing is already in history");
+            r.Record(Text("tool text"), "Wispr Flow", t0.AddSeconds(25));
+            r.Record(Text("C"), "Edge", t0.AddSeconds(26));
+            Check(!db.Clips().Any(x => x.Text == "tool text"), "the tool's text is gone");
+        }),
+
+        ("recorder: only picks and undone paste-throughs are quiet", () =>
+        {
+            var r = new Recorder(new Db());
+            var t0 = DateTime.Now;
+            Check(r.Record(Text("agent"), "Code", t0, ours: true) && !r.Quiet, "ClipBubble's own clipboard write counts when nothing expected it: an agent's or a screenshot's");
+            Check(r.Record(Text("B"), "Wispr Flow", t0.AddSeconds(5)) && !r.Quiet, "a normal copy counts");
+            Check(r.Record(Text("agent"), "Code", t0.AddSeconds(6)), "the restore changes the list");
+            Check(r.Quiet, "but undoing a paste-through isn't a copy");
+        }),
+
         ("recorder: files first, URL+image is an image, text+image is text, blank is nothing", () =>
         {
             var png = TinyPng();
@@ -552,13 +625,40 @@ static class Program
             Check(detail?.StartsWith("Another app is using") == true, "a locked database is put in plain words: " + detail);
         }),
 
+        ("Settings starts with Hide bubble until needed: off, saved, and with its shortcut only while on", () =>
+        {
+            var settings = new SettingsView(new Model(), TestApp.Value);
+            List<string> Words() => Descendants(settings).OfType<System.Windows.Controls.TextBlock>().Select(t => t.Text).ToList();
+            Check(!App.HideBubble, "off by default");
+            Check(Words().IndexOf("Hide bubble until needed") is >= 0 and var at && at < Words().IndexOf("Copied text"), "first in Settings");
+            Check(!Words().Contains("Show or hide bubble"), "no shortcut row while it's off");
+            Click(Switches(settings).First());
+            Check(App.HideBubble, "switched on");
+            Prefs.Reload();
+            Check(App.HideBubble, "still on when read back from disk, as after a restart");
+            Check(Words().Contains("Show or hide bubble") && Words().Contains("Ctrl+Alt+B"), "the shortcut row appears");
+            Click(Switches(settings).First());
+            Check(!App.HideBubble, "switched off");
+        }),
+
+        ("the bubble's shortcut defaults to Ctrl+Alt+B and comes back as saved", () =>
+        {
+            App.GlobalKey Key() => new(2, "bubbleHotkey", System.Windows.Input.ModifierKeys.Control | System.Windows.Input.ModifierKeys.Alt, System.Windows.Input.Key.B);
+            Check(Key().Text == "Ctrl+Alt+B", Key().Text);
+            Prefs.Set("bubbleHotkey", "Ctrl+Shift+K");
+            Check(Key().Text == "Ctrl+Shift+K", Key().Text);
+            Prefs.Set("bubbleHotkey", "nonsense");
+            Check(Key().Text == "Ctrl+Alt+B", "an unreadable one falls back: " + Key().Text);
+            Prefs.Set("bubbleHotkey", null);
+        }),
+
         ("a setting that can't be saved stays as it was and says why", () =>
         {
             var model = new Model();
             string? error = null;
             model.ShowError = (title, _) => error = title;
             var settings = new SettingsView(model, TestApp.Value);
-            var textSwitch = Descendants(settings).OfType<System.Windows.Controls.Border>().First(b => b.Width == 26 && b.Height == 15);
+            var textSwitch = Switches(settings).ElementAt(1);   // after Hide bubble until needed
             using (new FileStream(Path.Combine(Paths.Dir, "prefs.json"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 Click(textSwitch);
             Check(error == "Couldn't save that setting", "said why: " + error);
@@ -1164,6 +1264,9 @@ static class Program
 
     static IEnumerable<DependencyObject> Descendants(DependencyObject root) =>
         LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>().SelectMany(c => new[] { c }.Concat(Descendants(c)));
+
+    static IEnumerable<System.Windows.Controls.Border> Switches(DependencyObject root) =>
+        Descendants(root).OfType<System.Windows.Controls.Border>().Where(b => b.Width == 26 && b.Height == 15);
 
     static void Click(UIElement e) =>
         e.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0, System.Windows.Input.MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });

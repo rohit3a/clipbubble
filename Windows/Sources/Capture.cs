@@ -61,12 +61,13 @@ sealed class Capture : IDisposable
     readonly DispatcherTimer settle = new() { Interval = TimeSpan.FromSeconds(0.6) };
     readonly Writer writer;
     readonly Recorder recorder;
-    readonly Action onChange;
+    readonly Action<bool> onChange;
     uint seen, handled;
     (string Name, bool Ours) source = ("", false);
     int busyRetries;
 
-    public Capture(Writer writer, Action onChange)
+    /// `onChange` gets false when history changed but nothing new was copied.
+    public Capture(Writer writer, Action<bool> onChange)
     {
         this.writer = writer;
         recorder = new Recorder(writer.Db);
@@ -109,7 +110,8 @@ sealed class Capture : IDisposable
         handled = seen;
         if (data == null || Read(data) is not { } snapshot) return;
         var (from, at) = (source, DateTime.Now);   // paste-through tools are spotted by when things were copied, not by when the writer got to them
-        writer.Run(() => recorder.Record(snapshot, from.Name, at, from.Ours), onChange);
+        var quiet = false;
+        writer.Run(() => { var changed = recorder.Record(snapshot, from.Name, at, from.Ours); quiet = recorder.Quiet; return changed; }, () => onChange(!quiet));
     }
 
     /// Adds files from a watched folder (`files` is listed on the writer too, so a big backfill never blocks the UI).
@@ -165,6 +167,10 @@ sealed class Recorder(Db db)
     (string Hash, DateTime At, bool Inserted)? last;
     string? previousHash;
 
+    /// The last Record copied nothing new: it was a pick, a synced file, or an undone paste-through. Not the same as
+    /// `ours`, which a screenshot's copy and an agent's clipboard_set are too.
+    public bool Quiet { get; private set; }
+
     /// A file found in a watched folder. A new screenshot replaces the copy of the same picture made moments ago.
     public void AddFile(string path, string source, DateTime added)
     {
@@ -176,27 +182,32 @@ sealed class Recorder(Db db)
     /// `ours` means ClipBubble itself put it on the clipboard (see Db.Upsert's keepSource).
     public bool Record(Snapshot s, string source, DateTime now, bool ours = false)
     {
+        Quiet = false;
         if (Classify(s) is not { } clip) return false;
-        if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5 && e.MoveUp != clip.Hash)
+        if (ours && expected.TryRemove(clip.Hash, out var e) && (DateTime.UtcNow - e.At).TotalSeconds < 5)
         {
-            // Sync or the panel replaced the last copy, so copying that again is a new copy.
-            last = null;
-            previousHash = null;
-            if (e.MoveUp == null) return false;
-            db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
-            return true;
+            Quiet = true;
+            if (e.MoveUp != clip.Hash)
+            {
+                last = (clip.Hash, now, false);
+                previousHash = null;
+                if (e.MoveUp == null) return false;
+                db.Bump(e.MoveUp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+                return true;
+            }
         }
-        if (clip.Hash == last?.Hash && db.Exists(clip.Hash)) return false;   // copied again after a delete: save it again
+        if (!Quiet && clip.Hash == last?.Hash && db.Exists(clip.Hash)) return false;   // copied again after a delete: save it again
         var category = clip.Kind switch { ClipKind.Image => "images", ClipKind.File => "files", _ => "text" };
         if (!Prefs.On(category)) return false;
 
         // The previous contents came straight back, so what we just saw was a paste-through: drop it,
-        // and don't bump the restored item.
-        if (clip.Hash == previousHash && last is { } l && (now - l.At).TotalSeconds < 2.5 && db.Exists(clip.Hash))
+        // and don't bump the restored item. Not when ClipBubble put them back: that's a pick of the previous item.
+        if (!ours && clip.Hash == previousHash && last is { } l && (now - l.At).TotalSeconds < 2.5 && db.Exists(clip.Hash))
         {
             if (l.Inserted) db.Delete(l.Hash);
             last = (clip.Hash, now, false);
             previousHash = null;
+            Quiet = true;
             return true;
         }
 
@@ -215,7 +226,7 @@ sealed class Recorder(Db db)
             db.Delete(clip.Hash);
             return false;
         }
-        previousHash = last?.Hash;
+        previousHash = Quiet ? null : last?.Hash;
         last = (clip.Hash, now, inserted);
         return true;
     }

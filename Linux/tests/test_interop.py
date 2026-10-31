@@ -1,6 +1,7 @@
 """The Linux engine against the Mac engine in a real process: the same protocol from both codebases."""
 import os
 import subprocess
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -21,6 +22,57 @@ def wait_for(cond, seconds=10):
             return True
         time.sleep(0.05)
     return False
+
+
+class News(unittest.TestCase):
+    """What the bubble hears from sync: only an item arriving or moving up is news."""
+
+    class Peer:
+        offset = 0
+
+        def __init__(self):
+            self.known, self.offered = {}, {}
+
+        def send(self, frame):
+            pass
+
+        def download(self, d):
+            pass
+
+    def setUp(self):
+        self.e = eng.Engine()
+        self.e.apply = lambda c: None
+        self.news, self.refreshes = [], []
+        self.e.on_new = lambda: self.news.append(1)
+        self.e.on_received = lambda: self.refreshes.append(1)
+
+    def on_engine(self, fn):
+        done = threading.Event()
+        self.e.post(lambda: (fn(), done.set()))
+        self.assertTrue(done.wait(5))
+
+    def received(self, entry):
+        before = len(self.news), len(self.refreshes)
+        self.on_engine(lambda: self.e.received(entry, self.Peer()))
+        return len(self.news) - before[0], len(self.refreshes) - before[1]
+
+    def test_an_item_arriving_or_moving_up_is_news(self):
+        at = time.time() - 60
+        first = Entry("t:news-" + str(at), at, "text", "from the other machine", "Terminal", "other")
+        self.assertEqual(self.received(first), (1, 1), "a new item")
+        self.assertEqual(self.received(first), (0, 0), "the same item again")
+        self.assertEqual(self.received(Entry(first.hash, at + 5, "text", first.text, "Terminal", "other")), (1, 1), "copied again there")
+
+    def test_the_rest_refreshes_the_lists_and_nothing_else(self):
+        at = time.time() - 60
+        waiting = Entry("f:waiting-" + str(at), at, "file", "big.bin", "Files", "other", (Blob("big.bin", 26 << 20, ""),))
+        self.assertEqual(self.received(waiting), (1, 1), "a file over the size limit is listed")
+        self.assertEqual(self.received(waiting), (0, 1), "offered again on the next link, it isn't new")
+        d = eng.Download(waiting.hash, "file", ["big.bin"], [""], [26 << 20], "Files", False)
+        d.paths = [str(Path(HOME) / "big.bin")]
+        before = len(self.news), len(self.refreshes)
+        self.on_engine(lambda: self.e.finished(d, self.Peer()))
+        self.assertEqual((len(self.news) - before[0], len(self.refreshes) - before[1]), (0, 1), "its bytes arriving isn't a second item")
 
 
 @unittest.skipUnless(SWIFT.exists(), "build the Swift tests first (./tests.sh)")

@@ -25,7 +25,7 @@
 
 ## What it does
 
-- **A floating bubble with a pet.** It stays translucent in a screen corner until you need it. Drag it anywhere and it magnet-snaps to the nearest corner. When it catches a copy, the mascot hops and a badge counts up.
+- **A floating bubble with a pet.** It stays translucent in a screen corner until you need it. Drag it anywhere and it magnet-snaps to the nearest corner. When it catches a copy, the mascot hops and a badge counts up. Rather not see it all day? On Mac and Windows, switch on **Hide bubble until needed** in Settings: it stays out of sight until you copy something or press <kbd>⌃⌥B</kbd>, and leaves again after a few idle seconds.
 - **Remembers 7 days of everything.** Text, images, files, **every screenshot** (even the ones you never copied), **recent downloads**, and copies from your iPhone through Universal Clipboard.
 - **You choose what shows up.** Settings (⚙ in the panel) has a switch for each kind. Off means it isn't saved and is hidden everywhere, your agents included.
 - **Paste without hunting.** Press <kbd>⌃⌥V</kbd> anywhere, type to search, and press <kbd>↩</kbd>: it pastes straight into the app you were in. Or drag any item out into Slack, Figma or a browser upload.
@@ -69,6 +69,7 @@ Windows blocks unsigned scripts by default, which is why the command allows this
 
 What's different on Windows:
 - <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd> opens the panel. You can change it in Settings. In the panel, <kbd>Ctrl</kbd> replaces <kbd>⌘</kbd> and <kbd>Alt</kbd> replaces <kbd>⌥</kbd>, and <kbd>Ctrl</kbd><kbd>Delete</kbd> deletes, because <kbd>Ctrl</kbd><kbd>⌫</kbd> deletes a word in the search box.
+- <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>B</kbd> shows or hides the bubble with **Hide bubble until needed** on. You can change that in Settings too.
 - Screenshots come from `Pictures\Screenshots`, where <kbd>Win</kbd><kbd>PrtScn</kbd> and Snipping Tool save them, or from a folder you pick.
 - There's no iPhone filter, because Windows has no Universal Clipboard.
 - Auto-paste needs no permission. Apps running as administrator only get a copy, because Windows blocks typing into them.
@@ -114,6 +115,7 @@ Settings → Sync over SSH lists the hosts in your `~/.ssh/config`, with a switc
 | Key | Action |
 | --- | --- |
 | <kbd>⌃⌥V</kbd> | Open or close the panel from anywhere |
+| <kbd>⌃⌥B</kbd> | Show or hide the bubble, with **Hide bubble until needed** on. Change it in Settings. |
 | <kbd>↑</kbd> <kbd>↓</kbd> | Move the selection |
 | <kbd>↩</kbd> | Paste into the app you were in |
 | <kbd>⌥↩</kbd> | Copy only |

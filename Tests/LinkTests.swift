@@ -34,6 +34,17 @@ func runChild() -> Never {
             DB().upsert(kind: "text", text: t, file: nil, source: "Notes", hash: "t:" + sha(t))
         }
     }
+    if let f = env["LIVE_FILE"] {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            DB().upsert(kind: "file", text: f, file: nil, source: "Finder", hash: "f:" + sha(f))
+        }
+    }
+    if let t = env["DELETE_TEXT"] {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            let d = DB()
+            for c in d.clips(limit: 500) where c.text.hasPrefix(t) { d.delete(id: c.id) }
+        }
+    }
     dispatchMain()
 }
 
@@ -45,6 +56,11 @@ private func waitFor(_ what: String, seconds: Double = 8, _ cond: () -> Bool) ->
     }
     print("timed out waiting for \(what)")
     return false
+}
+
+/// Not `waitUntilExit`, which never returns for a child that failed to launch.
+private func waitForExit(_ p: Process) {
+    check(waitFor("child to exit", seconds: 30) { !p.isRunning }, "the child process exits")
 }
 
 private func childEnv(_ home: URL, _ extra: [String: String]) -> [String: String] {
@@ -159,7 +175,7 @@ func linkTests() {
     if let c = db.clip(hash: liveHash) { db.delete(id: c.id) }
     usleep(500_000)
     try? toChild.fileHandleForWriting.close()
-    p.waitUntilExit()
+    waitForExit(p)
 
     let dump = Process()
     dump.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
@@ -168,7 +184,7 @@ func linkTests() {
     dump.standardOutput = out
     try? dump.run()
     let lines = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map(String.init)
-    dump.waitUntilExit()
+    waitForExit(dump)
     check(lines.contains { $0.hasPrefix("clip|t:\(sha("mac-old"))|") && !$0.hasSuffix("||false|false") }, "the peer got this Mac's history")
     check(lines.contains("deleted|\(liveHash)") && !lines.contains { $0.hasPrefix("clip|\(liveHash)|") }, "the delete reached the peer")
     check(lines.contains { $0.hasPrefix("clip|i:\(sha(png))|") && $0.hasSuffix("|false|true") }, "the image is stored on the peer")
@@ -223,6 +239,76 @@ func linkTests() {
     try? newerIn.close()
 
     try? secondIn.fileHandleForWriting.close()
-    second.waitUntilExit()
+    waitForExit(second)
     DB.changed = hook
+}
+
+/// Links the shared engine with a second engine in its own process.
+func linkPeer(home: URL, _ extra: [String: String]) -> (Process, Pipe) {
+    let engine = SyncEngine.shared
+    let p = Process(), toChild = Pipe(), fromChild = Pipe()
+    p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    p.environment = childEnv(home, extra.merging(["CLIPBUBBLE_CHILD": "serve"]) { a, _ in a })
+    p.standardInput = toChild
+    p.standardOutput = fromChild
+    try? p.run()
+    engine.queue.sync { engine.begin(Session(input: fromChild.fileHandleForReading, output: toChild.fileHandleForWriting, engine: engine)) }
+    return (p, toChild)
+}
+
+func unlinkPeer(_ l: (Process, Pipe)) {
+    try? l.1.fileHandleForWriting.close()
+    waitForExit(l.0)
+    _ = waitFor("link gone") { SyncEngine.shared.linked.isEmpty }
+}
+
+/// What the bubble hears from sync: only an item arriving or moving up is news.
+func syncBadgeTests() {
+    let engine = SyncEngine.shared
+    let db = DB()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))   // earlier suites' news is still queued for the main thread
+    var news = 0, refreshes = 0
+    engine.apply = { _ in }
+    engine.onNew = { news += 1 }
+    engine.onReceived = { refreshes += 1 }
+    defer { engine.onNew = {}; engine.onReceived = {} }
+
+    let peerHome = testHome.appendingPathComponent("badge-peer")
+    try? FileManager.default.createDirectory(at: peerHome, withIntermediateDirectories: true)
+    func link(_ extra: [String: String]) -> (Process, Pipe) { linkPeer(home: peerHome, extra) }
+    func unlink(_ l: (Process, Pipe)) { unlinkPeer(l) }
+
+    // A delete on the other device changes the list and nothing else.
+    for i in 0..<5 { db.upsert(kind: "text", text: "doomed \(i)", file: nil, source: "Notes", hash: "t:" + sha("doomed \(i)")) }
+    let doomed = link(["DELETE_TEXT": "doomed"])
+    check(waitFor("deletes arrive") { !db.clips(limit: 500).contains { $0.text.hasPrefix("doomed") } }, "the peer's deletes arrive")
+    check(waitFor("lists refresh") { refreshes > 0 }, "they refresh the lists")
+    check(news == 0, "but aren't news, got \(news)")
+    unlink(doomed)
+
+    // One file from the other device is one item, however its bytes arrive.
+    let small = testHome.appendingPathComponent("one.bin")
+    try? Data(count: 200_000).write(to: small)
+    news = 0
+    let live = link(["LIVE_FILE": small.path])
+    check(waitFor("file arrives") { db.clip(hash: "f:" + sha(small.path))?.remote == false }, "the peer's file arrives")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    check(news == 1, "a synced file is news once, got \(news)")
+    unlink(live)
+
+    // An item still waiting for its bytes is offered again on every link, and that isn't news.
+    let huge = testHome.appendingPathComponent("waiting.bin")
+    try? Data(count: 26 << 20).write(to: huge)
+    news = 0
+    let first = link(["SEED_BIG": huge.path])
+    check(waitFor("waiting row") { db.clip(hash: "f:" + sha(huge.path))?.remote == true }, "the big file is listed")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    check(news == 1, "the first offer is news, got \(news)")
+    unlink(first)
+    news = 0
+    let second = link([:])
+    check(waitFor("relinked") { engine.linked.count == 1 }, "the peer links again")
+    RunLoop.main.run(until: Date().addingTimeInterval(1))
+    check(news == 0, "the same offer after a reconnect isn't, got \(news)")
+    unlink(second)
 }

@@ -88,7 +88,10 @@ class Engine:
         self.db = None
         # Puts a synced item on the clipboard. Swapped by tests so they never touch the real one.
         self.apply = lambda clip: None
+        # History changed, or a device's name did.
         self.on_received = lambda: None
+        # After on_received: that change was an item arriving or moving up, which the bubble announces.
+        self.on_new = lambda: None
         self.on_status = lambda: None
         # Called on the engine thread with {hash: Transfer} about four times a second while files move.
         self.on_transfers = lambda transfers: None
@@ -435,6 +438,7 @@ class Engine:
         newest = self.db.clips(limit=1)
         fresh = now - (e.time - s.offset) < 10 and e.time > (newest[0].created if newest else 0)
         action = sync.merge(self.db.stamp(e.hash), has_row, st)
+        new = False
         if action == "delete":
             return
         if action == "ignore":
@@ -443,6 +447,7 @@ class Engine:
                 return
         elif action == "bump":
             self.db.bump(e.hash, e.time)
+            new = True
             c = self.db.clip(hash=e.hash)
             if fresh and c and not c.remote:
                 self.apply_now(c, s)
@@ -452,6 +457,7 @@ class Engine:
             if e.kind == "file":
                 e = dataclasses.replace(e, text="\n".join(safe_file_name(n) for n in e.text.split("\n") if n))
             self.db.insert(e, "" if e.origin == self.device else e.origin)
+            new = True
             if e.kind == "text" and fresh:
                 self.apply_now(self.db.clip(hash=e.hash), s)
         # Still missing its bytes, whether new here or left over from a link that dropped mid-download.
@@ -462,6 +468,8 @@ class Engine:
                 s.download(self.make_download(e, s, fresh))
                 self.watch_transfers()
         self.on_received()
+        if new:
+            self.on_new()
 
     def apply_now(self, c, s):
         self.apply(c)

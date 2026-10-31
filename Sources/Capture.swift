@@ -4,20 +4,25 @@ import AppKit
 final class Capture {
     private let db = DB()
     private let queue = DispatchQueue(label: "clipbubble.capture")
-    private var count = NSPasteboard.general.changeCount
-    private var seenCount = NSPasteboard.general.changeCount
+    private let board: NSPasteboard
+    private var count: Int
+    private var seenCount: Int
     private var seenAt = Date()
     /// The latest capture and the one before it, to spot tools that paste through the clipboard.
     private var last: (hash: String, at: Date, inserted: Bool)?
     private var previousHash: String?
     private var timer: DispatchSourceTimer?
-    private let onChange: () -> Void
+    private let onChange: (_ copied: Bool) -> Void
 
-    /// The pasteboard change sync made when it put another device's copy there. Capturing it again would bounce it back.
+    /// The pasteboard change ClipBubble made itself, and the item it put there: another device's copy, or a pick from history.
+    /// Capturing it would bounce the copy back, or take a pick of the previous item for a paste-through.
     private static let skipLock = NSLock()
-    private static var skipCount = -1
-    static func ignoreChange(_ changeCount: Int) { skipLock.lock(); skipCount = changeCount; skipLock.unlock() }
-    private static func isSyncWrite(_ changeCount: Int) -> Bool { skipLock.lock(); defer { skipLock.unlock() }; return changeCount == skipCount }
+    private static var ownChange: (count: Int, hash: String)?
+    static func ignoreChange(_ changeCount: Int, hash: String) { skipLock.lock(); ownChange = (changeCount, hash); skipLock.unlock() }
+    private static func ownWrite(_ changeCount: Int) -> String? {
+        skipLock.lock(); defer { skipLock.unlock() }
+        return ownChange?.count == changeCount ? ownChange?.hash : nil
+    }
 
     /// Password managers and other tools mark secrets and throwaway copies with these; never record them.
     private static let skipTypes: Set<String> = [
@@ -27,7 +32,11 @@ final class Capture {
     ]
     /// Text bigger than this (a log dump, a database export) isn't kept: it would slow every list and search.
 
-    init(onChange: @escaping () -> Void) {
+    /// `copied` is false when history changed but nothing new was copied: a paste-through was undone.
+    init(board: NSPasteboard = .general, onChange: @escaping (_ copied: Bool) -> Void) {
+        self.board = board
+        count = board.changeCount
+        seenCount = count
         self.onChange = onChange
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: 0.4)
@@ -37,15 +46,14 @@ final class Capture {
     }
 
     private func poll() {
-        let pb = NSPasteboard.general
+        let pb = board
         let now = Date()
         // Let the clipboard settle first. Paste-through tools like Wispr Flow put text on it, press ⌘V and then
         // restore the old contents; reading during that window could make them paste the wrong thing.
         if pb.changeCount != seenCount { seenCount = pb.changeCount; seenAt = now; return }
         guard seenCount != count, now.timeIntervalSince(seenAt) >= 0.6 else { return }
         count = seenCount
-        // Sync replaced the last copy, so copying that again is a new copy.
-        if Self.isSyncWrite(count) { last = nil; previousHash = nil; return }
+        if let own = Self.ownWrite(count) { last = (own, now, false); previousHash = nil; return }
         let types = Set((pb.types ?? []).map(\.rawValue))
         guard !types.isEmpty, types.isDisjoint(with: Self.skipTypes), let clip = read(pb) else { return }
         // The same copy again is a no-op, unless it was deleted from history in between.
@@ -61,7 +69,7 @@ final class Capture {
             if l.inserted { db.delete(hash: l.hash) }
             last = (clip.hash, now, false)
             previousHash = nil
-            onChange()
+            onChange(false)
             return
         }
 
@@ -72,7 +80,7 @@ final class Capture {
         db.upsert(kind: clip.kind, text: clip.text, file: clip.file, source: source, hash: clip.hash)
         previousHash = last?.hash
         last = (clip.hash, now, inserted)
-        onChange()
+        onChange(true)
     }
 
     /// What's on the clipboard. An image isn't written anywhere yet: Copied images might be off.
