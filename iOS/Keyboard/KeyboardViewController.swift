@@ -103,7 +103,7 @@ final class KeyboardModel: ObservableObject {
             copy(c)
         }
         let live = SyncEngine.shared.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
-        linked = viaApp || !live.isEmpty
+        linked = !SyncEngine.enabledHosts.isEmpty && (viaApp || !live.isEmpty)
         status = SyncEngine.enabledHosts.isEmpty ? "No computers linked yet"
             : viaApp ? "Synced by the ClipBubble app"
             : !live.isEmpty ? live.joined(separator: ", ") : SyncEngine.shared.statuses.values.first?.text ?? "Connecting…"
