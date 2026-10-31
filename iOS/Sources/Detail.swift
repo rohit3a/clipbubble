@@ -61,8 +61,13 @@ struct ClipPreview: View {
 struct ClipDetail: View {
     @EnvironmentObject var model: Model
     @Environment(\.dismiss) private var dismiss
-    let clip: Clip
+    private let item: Clip
     @State private var confirmDelete = false
+
+    init(clip: Clip) { item = clip }
+
+    @State private var live: Clip?
+    private var clip: Clip { live ?? item }
 
     var body: some View {
         ScrollView {
@@ -86,7 +91,7 @@ struct ClipDetail: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }
+                Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }.accessibilityLabel("Delete")
             }
         }
         .confirmationDialog("Delete this item from ClipBubble everywhere?", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -101,6 +106,8 @@ struct ClipDetail: View {
             .padding(.horizontal).padding(.bottom, 8)
         }
         .toast(model.toast)
+        // Reads the item back whenever history changes, so the screen updates when Get brings it over.
+        .onReceive(model.$clips) { _ in live = DB().clip(hash: item.hash) ?? live }
     }
 
     private var device: String { clip.origin.isEmpty ? "This iPhone" : model.devices[clip.origin] ?? "computer" }
@@ -188,6 +195,12 @@ struct ZoomableImage: View {
 extension Clip {
     var names: String {
         kind == "image" ? "Image" : paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+    }
+
+    /// What VoiceOver reads for an item.
+    var spoken: String {
+        let what = kind == "text" ? String(text.prefix(300)) : kind == "image" ? "Image" : "File, \(names)"
+        return remote ? "\(what), still on another device" : what
     }
 }
 

@@ -12,18 +12,23 @@ enum Keys {
                                               kSecAttrAccessGroup as String: Platform.group]
 
     static let privateKey: Curve25519.Signing.PrivateKey = {
-        var out: CFTypeRef?
-        if SecItemCopyMatching(item.merging([kSecReturnData as String: true]) { $1 } as CFDictionary, &out) == errSecSuccess,
-           let d = out as? Data, let k = try? Curve25519.Signing.PrivateKey(rawRepresentation: d) {
-            return k
-        }
+        if let k = saved() { return k }
         let k = Curve25519.Signing.PrivateKey()
         // After first unlock, so Shortcuts and the keyboard can sign while the phone is locked in a pocket.
         let status = SecItemAdd(item.merging([kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
                                               kSecValueData as String: k.rawRepresentation]) { $1 } as CFDictionary, nil)
+        // The app and an extension can both make one at first launch; whichever saved first is the key.
+        if status == errSecDuplicateItem, let winner = saved() { return winner }
         if status != errSecSuccess { SyncLog.write("couldn't save the SSH key: \(status)") }
         return k
     }()
+
+    private static func saved() -> Curve25519.Signing.PrivateKey? {
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(item.merging([kSecReturnData as String: true]) { $1 } as CFDictionary, &out) == errSecSuccess,
+              let d = out as? Data else { return nil }
+        return try? Curve25519.Signing.PrivateKey(rawRepresentation: d)
+    }
 
     static var publicKey: String { String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: privateKey).publicKey) }
 

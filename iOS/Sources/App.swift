@@ -1,3 +1,4 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -22,7 +23,7 @@ struct ClipBubbleApp: App {
                 // While the app is open it holds the link, and the keyboard leaves it alone (see SyncEngine.suspend).
                 .onChange(of: phase, initial: true) {
                     guard phase != .inactive else { return }
-                    Platform.defaults.set(phase == .active, forKey: "app.active")
+                    model.heartbeat(phase == .active)
                     SyncEngine.shared.suspend(phase == .background)
                 }
         }
@@ -61,11 +62,22 @@ final class Model: ObservableObject {
         engine.onStatus = { [weak self] in self?.statuses = engine.statuses; self?.reload() }
         engine.onApplied = { [weak self] _, peer in self?.say("On \(peer)'s clipboard") }
         engine.start()
+        DB().prune()
         reload()
         // The share sheet and the keyboard write to the same history while the app is away.
         NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.hosts = SyncEngine.enabledHosts; self?.reload() }
+            Task { @MainActor in DB().prune(); self?.hosts = SyncEngine.enabledHosts; self?.reload() }
         }
+    }
+
+    /// While the app is open it stamps the time every few seconds. The keyboard trusts a recent stamp, so an app that
+    /// crashed while open doesn't leave it waiting for a link nobody holds.
+    private var beat: Timer?
+    func heartbeat(_ on: Bool) {
+        beat?.invalidate()
+        Platform.defaults.set(on ? Date().timeIntervalSince1970 : 0, forKey: "app.alive")
+        guard on else { return }
+        beat = .scheduledTimer(withTimeInterval: 4, repeats: true) { _ in Platform.defaults.set(Date().timeIntervalSince1970, forKey: "app.alive") }
     }
 
     func reload() {
@@ -97,7 +109,11 @@ final class Model: ObservableObject {
     }
 
     func copy(_ c: Clip) {
-        guard Clipboard.write(c) else { return }
+        if c.remote {
+            SyncEngine.shared.get(c.hash)
+            return say("Getting it from \(devices[c.origin] ?? "your computer")…")
+        }
+        guard Clipboard.write(c) else { return say("Couldn't copy that") }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         say("Copied")
     }
@@ -178,6 +194,7 @@ struct HistoryView: View {
     @State private var next: Adding?
     @State private var photos: [PhotosPickerItem] = []
     @State private var viewing: Clip?
+    @AppStorage("welcomed") private var welcomed = false
 
     enum Tab { case recent, library, add, settings }
     enum Adding { case panel, text, photos, files }
@@ -200,6 +217,9 @@ struct HistoryView: View {
             AddPanel(paste: model.paste) { next = $0; adding = nil }
         }
         .sheet(isPresented: shows(.text)) { TextComposer { model.addText($0) } }
+        .sheet(isPresented: Binding(get: { !welcomed && model.hosts.isEmpty }, set: { if !$0 { welcomed = true } })) {
+            Welcome { welcomed = true; tab = .settings }
+        }
         .photosPicker(isPresented: shows(.photos), selection: $photos, maxSelectionCount: 20, matching: .any(of: [.images, .videos]))
         .onChange(of: photos) {
             guard !photos.isEmpty else { return }
@@ -263,11 +283,55 @@ struct HistoryView: View {
     }
 }
 
+/// First launch: ClipBubble needs its computer half, so say so before anything else.
+struct Welcome: View {
+    let link: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Image(systemName: "laptopcomputer.and.iphone").font(.system(size: 44)).foregroundStyle(.tint).accessibilityHidden(true)
+                    Text("Welcome to ClipBubble").font(.largeTitle.bold())
+                    Text("Copy on your iPhone, paste on your computer, and back.").font(.title3).foregroundStyle(.secondary)
+                }
+                point("desktopcomputer", "Get ClipBubble for your computer",
+                      "It's free for Mac, Windows and Linux at clipbubble.krnl.studio, and keeps 7 days of what you copy.")
+                point("qrcode.viewfinder", "Link them once", "Open Link iPhone in ClipBubble on your computer and scan the code. They talk directly over your Wi-Fi.")
+                point("keyboard", "Use it anywhere", "Share anything to ClipBubble, or add the ClipBubble keyboard to type from your history in any app.")
+            }
+            .padding(28).padding(.top, 20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 10) {
+                Button { link(); dismiss() } label: { Text("Link a computer").font(.body.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 30) }
+                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
+                Button("Not now") { dismiss() }.font(.body.weight(.medium))
+            }
+            .padding(.horizontal, 28).padding(.bottom, 12)
+        }
+        .interactiveDismissDisabled()
+    }
+
+    private func point(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: symbol).font(.title2).foregroundStyle(.tint).frame(width: 36).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(detail).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// Add: paste what's on this iPhone's clipboard, type a note, or pick photos or files.
 struct AddPanel: View {
     let paste: ([NSItemProvider]) -> Void
     let pick: (HistoryView.Adding) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         VStack(spacing: 18) {
@@ -287,7 +351,7 @@ struct AddPanel: View {
         .padding(.horizontal, 20)
         .padding(.top, 24)
         .frame(maxHeight: .infinity, alignment: .top)
-        .presentationDetents([.height(270)])
+        .presentationDetents(size.isAccessibilitySize ? [.large] : [.height(270)])
         .presentationCornerRadius(32)
     }
 
@@ -428,6 +492,10 @@ struct ClipRow: View {
             }
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(clip.spoken)
+        .accessibilityValue([device ?? clip.source, clip.created.formatted(.relative(presentation: .named))].filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityHint(clip.remote ? "Gets it from the computer" : "Copies it")
     }
 
     private var icon: String { clip.remote ? "icloud.and.arrow.down" : clip.look.symbol }
@@ -438,6 +506,7 @@ struct SettingsView: View {
     @EnvironmentObject var model: Model
     @State private var alias = ""
     @State private var scanning = false
+    @State private var scanFailed = false
     @AppStorage("appearance") private var appearance = Appearance.system
 
     var body: some View {
@@ -447,6 +516,10 @@ struct SettingsView: View {
                     Text("On your Mac, Windows PC or Linux computer, open ClipBubble → Settings → Sync over SSH → Link iPhone…, then scan the code with this iPhone's Camera.")
                     if DataScannerViewController.isSupported {
                         Button { scanning = true } label: { Label("Scan code", systemImage: "qrcode.viewfinder") }
+                    }
+                    if scanFailed {
+                        Text("The camera isn't available. Allow ClipBubble to use it in Settings, or link by hand below.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 } header: { Text("Link a computer") }
 
@@ -488,10 +561,22 @@ struct SettingsView: View {
                 } header: { Text("Clipboard keyboard") } footer: {
                     Text("Your history in any app: tap an item to type it. Full Access is what lets it link to your computers; it never logs what you type.")
                 }
+
+                Section {
+                    Link(destination: URL(string: "https://clipbubble.krnl.studio/privacy")!) { Label("Privacy policy", systemImage: "hand.raised") }
+                    Link(destination: URL(string: "https://clipbubble.krnl.studio/support")!) { Label("Help and support", systemImage: "questionmark.circle") }
+                } footer: {
+                    Text("ClipBubble \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""). History stays on your devices for 7 days.")
+                }
             }
             .navigationTitle("Settings")
             .sheet(isPresented: $scanning) {
-                Scanner { url in scanning = false; model.open(url) }.ignoresSafeArea()
+                NavigationStack {
+                    Scanner(found: { url in scanning = false; model.open(url) },
+                            failed: { scanning = false; scanFailed = true })
+                        .ignoresSafeArea()
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { scanning = false } } }
+                }
             }
         }
     }
@@ -500,11 +585,16 @@ struct SettingsView: View {
 /// The camera, looking for a computer's pairing code.
 struct Scanner: UIViewControllerRepresentable {
     let found: (URL) -> Void
+    let failed: () -> Void
 
     func makeUIViewController(context: Context) -> DataScannerViewController {
         let v = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], isHighlightingEnabled: true)
         v.delegate = context.coordinator
-        try? v.startScanning()
+        // Unavailable means the camera is denied or busy; the sheet closes and Settings says what to do.
+        let denied = [.denied, .restricted].contains(AVCaptureDevice.authorizationStatus(for: .video))
+        if denied || (try? v.startScanning()) == nil {
+            DispatchQueue.main.async(execute: failed)
+        }
         return v
     }
 

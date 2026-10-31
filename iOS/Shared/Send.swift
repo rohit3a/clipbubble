@@ -94,26 +94,29 @@ enum Courier {
                         add: @escaping () async -> [String]) async -> String {
         let engine = SyncEngine.shared
         guard !SyncEngine.enabledHosts.isEmpty else {
-            _ = await add()
-            return "Saved. Link a computer in ClipBubble to send it there."
+            return await add().isEmpty ? "Couldn't save that." : "Saved. Link a computer in ClipBubble to send it there."
         }
         engine.start()
         status("Connecting…")
         let linked = await until(seconds: 10) { engine.statuses.values.contains { $0.ok } }
         let hashes = await add()
-        guard !hashes.isEmpty else { return "Nothing to send." }
+        guard !hashes.isEmpty else { return "Couldn't save that." }
         guard linked else {
-            let why = engine.statuses.values.first { !$0.ok }?.text ?? "Offline"
-            return "Saved. \(why), so it goes over next time."
+            // Connecting or offline needs nothing from you; anything else (an untrusted host, a missing key) does.
+            switch engine.statuses.values.first(where: { !$0.ok }) {
+            case nil, .connecting?, .offline?: return "Saved. It goes to your computer next time ClipBubble connects."
+            case let s?: return "Saved. \(s.text). It goes over once that's fixed."
+            }
         }
         let names = engine.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
         status("Sending to \(names.joined(separator: ", "))…")
         // Big files wait for Get on the computer; sending them from here means you want them there now.
         for h in hashes where h.hasPrefix("f:") { engine.linked.forEach { engine.send(h, toDevice: $0.device) } }
+        // Each item and computer that confirmed it, so two of three photos arriving isn't reported as all of them.
         var got: Set<String> = []
         var progress: [String: Transfer] = [:]
         let (wasApplied, wasTransfers) = (engine.onApplied, engine.onTransfers)
-        engine.onApplied = { hash, peer in wasApplied(hash, peer); if hashes.contains(hash) { got.insert(peer) } }
+        engine.onApplied = { hash, peer in wasApplied(hash, peer); if hashes.contains(hash) { got.insert(hash + "\n" + peer) } }
         engine.onTransfers = { t in
             wasTransfers(t)
             progress = t
@@ -125,13 +128,16 @@ enum Courier {
         }
         // A file still uploading gets up to ten more minutes.
         let deadline = Date().addingTimeInterval(timeout), hardStop = deadline.addingTimeInterval(600)
-        while got.count < names.count, Date() < hardStop, Date() < deadline || progress.values.contains(where: \.sending) {
+        while got.count < names.count * hashes.count, Date() < hardStop, Date() < deadline || progress.values.contains(where: \.sending) {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         engine.onApplied = wasApplied
         engine.onTransfers = wasTransfers
-        if got.isEmpty { return "Sent to \(names.joined(separator: ", "))." }
-        return "On the clipboard of \(got.sorted().joined(separator: ", "))."
+        // No answer yet doesn't mean it arrived: it's saved here and syncs again next time.
+        if got.isEmpty { return "Saved. Still waiting for \(names.joined(separator: ", ")) to confirm." }
+        let complete = names.filter { n in hashes.allSatisfy { got.contains($0 + "\n" + n) } }
+        if complete.count == names.count { return "On the clipboard of \(complete.sorted().joined(separator: ", "))." }
+        return "Saved. Some items are still on their way to \(names.joined(separator: ", "))."
     }
 
     private static func until(seconds: Double, _ cond: () -> Bool) async -> Bool {

@@ -36,6 +36,13 @@ func storeTests() {
     db.upsert(kind: "file", text: "/tmp/x.png", file: nil, source: "Finder", hash: "f:old2")
     check(db.clip(hash: "f:old2") != nil, "copying it again brings it back")
 
+    // On a computer, deleting a copied file removes the item, never the file, even one inside ClipBubble's folder.
+    let mine = Paths.dir.appendingPathComponent("notes.txt")
+    FileManager.default.createFile(atPath: mine.path, contents: Data("keep".utf8))
+    db.upsert(kind: "file", text: mine.path, file: nil, source: "Finder", hash: "f:mine")
+    db.delete(hash: "f:mine")
+    check(FileManager.default.fileExists(atPath: mine.path), "deleting a copied file keeps the file")
+
     // Stamps carry the latest event per hash, and a delete outranks the copy it removed.
     db.delete(hash: "t:old1")
     let stamps = Dictionary(uniqueKeysWithValues: db.stamps().map { ($0.hash, $0) })

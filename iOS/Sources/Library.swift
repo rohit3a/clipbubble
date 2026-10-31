@@ -187,6 +187,9 @@ struct LibraryTile: View {
             .font(.caption2).foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(clip.spoken)
+        .accessibilityValue([device ?? clip.source, clip.created.formatted(date: .omitted, time: .shortened)].filter { !$0.isEmpty }.joined(separator: ", "))
     }
 
     @ViewBuilder private var content: some View {
