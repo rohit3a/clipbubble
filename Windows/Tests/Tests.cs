@@ -868,7 +868,7 @@ static class Program
                 Snapshots.Pump(0.5);
                 Check(Math.Abs(scroller.VerticalOffset - before) < 50, $"still at {scroller.VerticalOffset:0}, was {before:0}");
                 model.Query = "item";
-                Snapshots.Pump(0.2);
+                for (var i = 0; i < 100 && scroller.VerticalOffset != 0; i++) Snapshots.Pump(0.1);   // up to 10 s, for a slow runner
                 Check(scroller.VerticalOffset == 0, $"a new search starts at the top ({scroller.VerticalOffset:0})");
             }
             finally { host.Close(); }
