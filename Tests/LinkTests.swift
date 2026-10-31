@@ -58,6 +58,11 @@ private func waitFor(_ what: String, seconds: Double = 8, _ cond: () -> Bool) ->
     return false
 }
 
+/// Not `waitUntilExit`, which never returns for a child that failed to launch.
+private func waitForExit(_ p: Process) {
+    check(waitFor("child to exit", seconds: 30) { !p.isRunning }, "the child process exits")
+}
+
 private func childEnv(_ home: URL, _ extra: [String: String]) -> [String: String] {
     var env = ProcessInfo.processInfo.environment
     env["CLIPBUBBLE_HOME"] = home.path
@@ -170,7 +175,7 @@ func linkTests() {
     if let c = db.clip(hash: liveHash) { db.delete(id: c.id) }
     usleep(500_000)
     try? toChild.fileHandleForWriting.close()
-    p.waitUntilExit()
+    waitForExit(p)
 
     let dump = Process()
     dump.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
@@ -179,7 +184,7 @@ func linkTests() {
     dump.standardOutput = out
     try? dump.run()
     let lines = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map(String.init)
-    dump.waitUntilExit()
+    waitForExit(dump)
     check(lines.contains { $0.hasPrefix("clip|t:\(sha("mac-old"))|") && !$0.hasSuffix("||false|false") }, "the peer got this Mac's history")
     check(lines.contains("deleted|\(liveHash)") && !lines.contains { $0.hasPrefix("clip|\(liveHash)|") }, "the delete reached the peer")
     check(lines.contains { $0.hasPrefix("clip|i:\(sha(png))|") && $0.hasSuffix("|false|true") }, "the image is stored on the peer")
@@ -234,7 +239,7 @@ func linkTests() {
     try? newerIn.close()
 
     try? secondIn.fileHandleForWriting.close()
-    second.waitUntilExit()
+    waitForExit(second)
     DB.changed = hook
 }
 
@@ -253,7 +258,7 @@ func linkPeer(home: URL, _ extra: [String: String]) -> (Process, Pipe) {
 
 func unlinkPeer(_ l: (Process, Pipe)) {
     try? l.1.fileHandleForWriting.close()
-    l.0.waitUntilExit()
+    waitForExit(l.0)
     _ = waitFor("link gone") { SyncEngine.shared.linked.isEmpty }
 }
 
@@ -261,6 +266,7 @@ func unlinkPeer(_ l: (Process, Pipe)) {
 func syncBadgeTests() {
     let engine = SyncEngine.shared
     let db = DB()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))   // earlier suites' news is still queued for the main thread
     var news = 0, refreshes = 0
     engine.apply = { _ in }
     engine.onNew = { news += 1 }

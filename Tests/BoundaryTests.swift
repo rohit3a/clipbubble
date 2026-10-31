@@ -78,8 +78,9 @@ func boundaryTests() {
     try? secretData.write(to: secret)
     let link = testHome.appendingPathComponent("innocent.txt")
     try? FileManager.default.createSymbolicLink(at: link, withDestinationURL: secret)
+    let cwd = FileManager.default.currentDirectoryPath   // later suites relaunch this binary by its relative path
     FileManager.default.changeCurrentDirectoryPath(testHome.path)
-    defer { FileManager.default.changeCurrentDirectoryPath("/") }
+    defer { FileManager.default.changeCurrentDirectoryPath(cwd) }
 
     let peer = RawPeer()
     let engine = SyncEngine.shared
