@@ -72,8 +72,13 @@ final class SSHTunnel: Tunnel {
     private var finished = false
     private let stderr: (Data) -> Void
     private let exited: () -> Void
+    private let alias: String
+    private let address: String
+    private var relayed = false
 
     init(alias: String, command: String, stderr: @escaping (Data) -> Void, exited: @escaping () -> Void) throws {
+        // The pipes below outlive a dropped link for a moment, and a write to a closed one would otherwise kill the process.
+        signal(SIGPIPE, SIG_IGN)
         guard let target = SSHTarget(alias) else { throw SSHTunnelError.badAlias }
         input = toSession.fileHandleForReading
         output = fromSession.fileHandleForWriting
@@ -82,6 +87,9 @@ final class SSHTunnel: Tunnel {
         let say: (String) -> Void = { stderr(Data(($0 + "\n").utf8)) }
         let hostKeys = HostKeys(id: "\(target.host):\(target.port)", say: say)
         let auth = KeyAuth(user: target.user, say: say)
+        let address = Addresses.next(for: alias, fallback: target.host)
+        self.alias = alias
+        self.address = address
 
         ClientBootstrap(group: Self.group)
             .connectTimeout(.seconds(8))
@@ -99,16 +107,16 @@ final class SSHTunnel: Tunnel {
                         CloseOnError())
                 }
             }
-            .connect(host: target.host, port: target.port)
+            .connect(host: address, port: target.port)
             .whenComplete { [self] result in
                 switch result {
                 case .failure(let e):
-                    say("ssh: connect to host \(target.host) port \(target.port): \(e)")
+                    say("ssh: connect to host \(address) port \(target.port): \(e)")
                     finish()
                 case .success(let channel):
                     lock.lock(); connection = channel; let stop = ended; lock.unlock()
-                    if stop { channel.close(promise: nil); return }
                     channel.closeFuture.whenComplete { [self] _ in finish() }
+                    if stop { channel.close(promise: nil); return }
                     open(command, on: channel)
                 }
             }
@@ -132,10 +140,13 @@ final class SSHTunnel: Tunnel {
 
     /// Starts sending what the session writes, once the relay is running.
     fileprivate func relayStarted(_ child: Channel) {
+        lock.lock(); relayed = true; lock.unlock()
+        Addresses.worked(address, for: alias)
         fromSession.fileHandleForReading.readabilityHandler = { h in
             let d = h.availableData
             guard !d.isEmpty else { h.readabilityHandler = nil; child.close(promise: nil); return }
-            child.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(ByteBuffer(bytes: d))), promise: nil)
+            // Waiting backs up into the pipe and then the session, which keeps a big upload out of memory and lets a ping overtake it.
+            try? child.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(ByteBuffer(bytes: d)))).wait()
         }
     }
 
@@ -156,8 +167,10 @@ final class SSHTunnel: Tunnel {
         let first = !finished
         finished = true
         connection = nil
+        let worked = relayed
         lock.unlock()
         guard first else { return }
+        if !worked { Addresses.failed(address, for: alias) }
         fromSession.fileHandleForReading.readabilityHandler = nil
         try? toSession.fileHandleForWriting.close()
         exited()
@@ -165,6 +178,32 @@ final class SSHTunnel: Tunnel {
 }
 
 enum SSHTunnelError: Error { case badAlias, refused, hostKeyChanged }
+
+/// Every address a computer offered when it linked, last one that worked first. Wi-Fi hands out new IP addresses, and
+/// a .local name doesn't resolve on every network, so a dial that fails moves on to the next. They all reach one
+/// computer: the host key is pinned to the link, not to an address.
+enum Addresses {
+    private static func key(_ alias: String) -> String { "sync.addresses." + alias }
+
+    static func save(_ hosts: [String], for alias: String) { Platform.defaults.set(hosts, forKey: key(alias)) }
+    static func forget(_ alias: String) { Platform.defaults.removeObject(forKey: key(alias)) }
+
+    static func next(for alias: String, fallback: String) -> String {
+        Platform.defaults.stringArray(forKey: key(alias))?.first ?? fallback
+    }
+
+    static func worked(_ address: String, for alias: String) {
+        guard var all = Platform.defaults.stringArray(forKey: key(alias)), all.first != address, all.contains(address) else { return }
+        all.removeAll { $0 == address }
+        save([address] + all, for: alias)
+    }
+
+    static func failed(_ address: String, for alias: String) {
+        guard var all = Platform.defaults.stringArray(forKey: key(alias)), all.count > 1, all.first == address else { return }
+        all.removeFirst()
+        save(all + [address], for: alias)
+    }
+}
 
 /// One `exec` channel: the relay command's stdout goes to the session, its stderr to the link's status.
 private final class RelayHandler: ChannelDuplexHandler {

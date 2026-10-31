@@ -33,6 +33,7 @@ final class SyncEngine {
     private var progressTimer: DispatchSourceTimer?
     private var lastTransfers: [String: Transfer] = [:]
     private var suspended = false
+    private var holds = 0
 
     private init() {
         let idFile = Paths.dir.appendingPathComponent("device-id")
@@ -134,7 +135,15 @@ final class SyncEngine {
         queue.async { [self] in
             guard on != suspended else { return }
             suspended = on
-            if on { sessions.forEach { $0.close() } }
+            if on, holds == 0 { sessions.forEach { $0.close() } }
+            reconcileLinks()
+        }
+    }
+
+    /// A Shortcut can run while the app sits suspended in the background, and needs the link for as long as it runs.
+    func hold(_ on: Bool) {
+        queue.async { [self] in
+            holds += on ? 1 : -1
             reconcileLinks()
         }
     }
@@ -151,7 +160,7 @@ final class SyncEngine {
     private(set) var statuses: [String: LinkState] = [:]
 
     private func reconcileLinks() {
-        let want = Self.paused || suspended ? [] : Set(Self.enabledHosts)
+        let want = Self.paused || (suspended && holds == 0) ? [] : Set(Self.enabledHosts)
         for (alias, link) in links where !want.contains(alias) {
             link.stop()
             links[alias] = nil
@@ -181,7 +190,7 @@ final class SyncEngine {
         let m = NWPathMonitor()
         m.pathUpdateHandler = { [weak self] p in
             guard p.status == .satisfied else { return }
-            self?.queue.async { self?.links.values.forEach { $0.redialIfDown() } }
+            self?.queue.async { self?.links.values.forEach { $0.networkChanged() } }
         }
         m.start(queue: queue)
         pathMonitor = m
@@ -202,6 +211,8 @@ final class SyncEngine {
     func ended(_ s: Session) {
         sessions.removeAll { $0 === s }
         s.link?.sessionEnded(s)
+        let peers = Set(sessions.compactMap { $0.peer?.device })
+        links.values.forEach { $0.takeOver(unlessLinked: peers) }
         publishStatus()
     }
 
@@ -240,6 +251,8 @@ final class SyncEngine {
                       origin: c.origin.isEmpty ? device : c.origin, blobs: [])
         switch c.kind {
         case "text":
+            // Only an old version stores more than this. Sent, it would drop the link on every reconnect.
+            guard c.text.utf8.count <= Sync.maxText else { return nil }
             e.text = c.text
         case "image":
             guard !c.remote, let f = c.file, let size = fileSize(f) else { return c.remote ? e : nil }
@@ -275,13 +288,14 @@ final class SyncEngine {
                 return
             }
             guard h.device != device else { s.close(); return }
-            if let old = sessions.first(where: { $0 !== s && $0.peer?.device == h.device }) {
-                // A device dialling in again has given up on its old link (an iPhone that slept): the new one replaces it.
-                // Otherwise the two ends dialled each other, and the first link stays.
-                guard old.link == nil, s.link == nil else { s.close(); return }
-                old.close()
-            }
+            let old = sessions.first { $0 !== s && $0.peer?.device == h.device }
+            // A device dialling in again has given up on its old link (an iPhone that slept), and two names for one
+            // computer look the same from there: either way the far end keeps the new link, so this end has to as well.
+            // If only one side has a link here, the two ends dialled each other, and the first link stays.
+            if let old, (old.link == nil) != (s.link == nil) { s.close(); return }
             s.peer = h
+            old?.link?.standBy(for: h)
+            old?.close()
             s.offset = h.clock - Date().timeIntervalSince1970
             if abs(s.offset) > 30 { SyncLog.write("\(h.name)'s clock is \(Int(s.offset)) s off") }
             if db.saveDevice(id: h.device, name: h.name, os: h.os) { share(id: h.device, name: h.name, os: h.os, from: s) }
@@ -424,8 +438,8 @@ enum LinkState: Equatable {
         switch self {
         case .connecting: return "Connecting…"
         case .live(let h): return "Linked with \(h.name)"
-        case .needsKeyAuth: return "Needs SSH key login"
-        case .unknownHost: return "Connect once in Terminal to trust this host"
+        case .needsKeyAuth: return Platform.keyRefused
+        case .unknownHost: return Platform.hostChanged
         case .notInstalled: return "ClipBubble isn't installed there"
         case .appNotRunning: return "ClipBubble isn't running there"
         case .versionMismatch(let h): return "Update needed (it has \(h.version))"
@@ -454,9 +468,19 @@ final class HostLink {
     private var stderr = ""
     private var backoff: Double = 1
     private var retry: DispatchWorkItem?
+    private var deadline: DispatchWorkItem?
+    private var pulse: DispatchSourceTimer?
     private var stopped = false
     private var mismatch: Hello?
+    /// Redial was asked for while an attempt was still running.
+    private var again = false
+    /// The device another alias already reached, which keeps only one link. This one waits for that link to end.
+    private var standby: String?
     private(set) var state: LinkState = .connecting
+
+    private static let helloLimit: Double = 20
+    private static let pingEvery: Double = 15
+    private static let probeLimit: Double = 5
 
     private var windows: Bool {
         get { Platform.defaults.string(forKey: "sync.os." + alias) == "windows" }
@@ -491,12 +515,56 @@ final class HostLink {
         s.link = self
         session = s
         engine.begin(s)
+        // The connect timeout ends at TCP. A computer that accepts and then says nothing would read "Connecting…" forever.
+        let d = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            SyncLog.write("\(alias): no answer in \(Int(Self.helloLimit)) s")
+            hangUp()
+        }
+        deadline = d
+        engine.queue.asyncAfter(deadline: .now() + Self.helloLimit, execute: d)
     }
 
     func helloReceived(_ h: Hello) {
+        deadline?.cancel()
         backoff = 1
         mismatch = nil
         set(.live(h))
+        watchPeer()
+    }
+
+    /// SSH's keepalives only prove the connection. A ping proves ClipBubble is answering at the far end, and an idle
+    /// link has no other way to find out. Anything heard counts, so a long download never looks silent.
+    private func watchPeer() {
+        let t = DispatchSource.makeTimerSource(queue: engine.queue)
+        t.schedule(deadline: .now() + Self.pingEvery, repeating: Self.pingEvery)
+        t.setEventHandler { [weak self] in self?.beat() }
+        t.resume()
+        pulse = t
+    }
+
+    private func beat() {
+        guard let s = session else { return }
+        if s.silence < Self.pingEvery * 2 { return s.send(.ping(Date().timeIntervalSince1970)) }
+        SyncLog.write("\(alias): no answer to pings")
+        hangUp()
+    }
+
+    private func hangUp() {
+        if let s = session { s.close() } else { tunnel?.close() }
+    }
+
+    /// Another alias reached this computer: stop retrying, and show the link as up, since it is.
+    func standBy(for h: Hello) {
+        standby = h.device
+        set(.live(h))
+    }
+
+    func takeOver(unlessLinked peers: Set<String>) {
+        guard let d = standby, !peers.contains(d) else { return }
+        standby = nil
+        backoff = 1
+        connect()
     }
 
     func versionMismatch(_ h: Hello) { mismatch = h }
@@ -510,8 +578,12 @@ final class HostLink {
     private func exited() {
         let wasLive = state.ok
         tunnel = nil
+        deadline?.cancel()
+        pulse?.cancel()
+        pulse = nil
         if let s = session { session = nil; s.close() }
-        guard !stopped else { return }
+        guard !stopped, standby == nil else { return }
+        if again { again = false; return connect() }
         let err = stderr
         if !windows && (err.contains("is not recognized") || err.contains("CommandNotFoundException")) {
             windows = true
@@ -527,7 +599,10 @@ final class HostLink {
         else { next = .offline(Date().addingTimeInterval(wasLive ? 1 : backoff)) }
         if !err.isEmpty { SyncLog.write("\(alias): \(err.trimmingCharacters(in: .whitespacesAndNewlines).suffix(300))") }
         // Problems only you can fix retry slowly; a dropped link comes back fast.
-        if case .offline = next {} else { backoff = max(backoff, 60) }
+        switch next {
+        case .offline, .appNotRunning: break
+        default: backoff = max(backoff, 60)
+        }
         if wasLive { backoff = 1 }
         set(next)
         scheduleRetry()
@@ -537,20 +612,35 @@ final class HostLink {
         let w = DispatchWorkItem { [weak self] in self?.connect() }
         retry = w
         engine.queue.asyncAfter(deadline: .now() + backoff, execute: w)
-        backoff = min(backoff * 2, 300)
+        backoff = min(backoff * 2, Platform.retryCap)
     }
 
-    func redialIfDown() { if case .offline = state { redial() } }
+    /// A link that looks fine may have died with the old network, so it has one ping to prove otherwise.
+    func networkChanged() {
+        if case .offline = state { return redial() }
+        guard state.ok, let s = session else { return }
+        let asked = DispatchTime.now()
+        s.send(.ping(Date().timeIntervalSince1970))
+        engine.queue.asyncAfter(deadline: asked + Self.probeLimit) { [weak self, weak s] in
+            guard let self, let s, session === s, s.heardAt < asked else { return }
+            SyncLog.write("\(alias): no answer after the network changed")
+            hangUp()
+        }
+    }
 
     func redial() {
-        guard !stopped, tunnel == nil else { return }
+        guard !stopped, standby == nil else { return }
         backoff = 1
-        connect()
+        if tunnel == nil { connect() }
+        // Asking again means this attempt isn't getting anywhere, or may not be.
+        else if !state.ok { again = true; hangUp() }
     }
 
     func stop() {
         stopped = true
         retry?.cancel()
+        deadline?.cancel()
+        pulse?.cancel()
         session?.close()
         tunnel?.close()
     }
@@ -585,6 +675,7 @@ final class Session {
     private var control: [Data] = []
     private var uploads: [Upload] = []
     private var writing = false
+    private(set) var heardAt = DispatchTime.now()
     private(set) var closed = false
     private let writeQueue = DispatchQueue(label: "clipbubble.sync.write", qos: .utility)
 
@@ -601,6 +692,7 @@ final class Session {
             self.engine.queue.async {
                 guard !self.closed else { return }
                 if d.isEmpty { self.close(); return }
+                self.heardAt = .now()
                 do { for f in try self.reader.feed(d) where !self.closed { self.engine.handle(f, from: self) } }
                 catch { SyncLog.write("dropped \(self.peer?.name ?? "peer"): malformed frame"); self.close() }
             }
@@ -608,6 +700,9 @@ final class Session {
         send(.hello(hello))
         send(.summary(summary))
     }
+
+    /// Seconds since anything arrived, not counting sleep. Read on the engine's queue.
+    var silence: Double { Double(DispatchTime.now().uptimeNanoseconds - heardAt.uptimeNanoseconds) / 1e9 }
 
     func send(_ f: Frame) {
         lock.lock()

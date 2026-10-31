@@ -6,6 +6,9 @@ enum Platform {
     static var deviceName: String { Host.current().localizedName ?? "Mac" }
     static let dataDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ClipBubble")
     static let defaults = UserDefaults.standard
+    static let retryCap: Double = 300
+    static let hostChanged = "Connect once in Terminal to trust this host"
+    static let keyRefused = "Needs SSH key login"
     static var downloads: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")

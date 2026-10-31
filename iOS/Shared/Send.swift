@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// What this iPhone adds to the history: the clipboard, the share sheet and Shortcuts. Each returns the item's hash.
 enum Inbox {
     static func text(_ t: String, source: String) -> String? {
-        guard !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard t.utf8.count <= Sync.maxText, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let hash = "t:" + sha(t)
         DB().upsert(kind: "text", text: t, file: nil, source: source, hash: hash)
         return hash
@@ -96,6 +96,8 @@ enum Courier {
         guard !SyncEngine.enabledHosts.isEmpty else {
             return await add().isEmpty ? "Couldn't save that." : "Saved. Link a computer in ClipBubble to send it there."
         }
+        engine.hold(true)
+        defer { engine.hold(false) }
         engine.start()
         status("Connecting…")
         let linked = await until(seconds: 10) { engine.statuses.values.contains { $0.ok } }
@@ -108,7 +110,7 @@ enum Courier {
             case let s?: return "Saved. \(s.text). It goes over once that's fixed."
             }
         }
-        let names = engine.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }
+        let names = Array(Set(engine.statuses.values.compactMap { s -> String? in if case .live(let h) = s { return h.name }; return nil }))
         status("Sending to \(names.joined(separator: ", "))…")
         // Big files wait for Get on the computer; sending them from here means you want them there now.
         for h in hashes where h.hasPrefix("f:") { engine.linked.forEach { engine.send(h, toDevice: $0.device) } }

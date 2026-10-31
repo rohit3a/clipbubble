@@ -6,6 +6,8 @@ import Foundation
 enum Sync {
     static let proto: UInt32 = 1
     static let maxFrame = 4 << 20
+    /// The longest text that goes in the history, well inside a frame.
+    static let maxText = 2_000_000
     static let chunkSize = 256 << 10
     /// Files and images up to this size move on their own; bigger ones wait for Get or Send to.
     static let autoFetchLimit: Int64 = 25 << 20

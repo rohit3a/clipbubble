@@ -10,7 +10,7 @@ enum Pairing {
         var errorDescription: String? {
             switch self {
             case .badLink: return "That isn't a ClipBubble pairing code."
-            case .unreachable: return "Couldn't reach the computer. Is this iPhone on the same Wi-Fi?"
+            case .unreachable: return "Couldn't reach the computer. Check that this iPhone is on the same Wi-Fi, and that Local Network is on for ClipBubble in Settings."
             case .refused(let why): return why
             }
         }
@@ -49,7 +49,16 @@ enum Pairing {
         }
         // Trusts exactly the key the computer reported, so even the first SSH connection is checked.
         if let key = r["hostKey"] as? String, !key.isEmpty { Platform.defaults.set(key, forKey: "sync.hostkey.\(host):22") }
-        return ("\(user)@\(host)", r["name"] as? String ?? host)
+        let alias = "\(user)@\(host)"
+        Addresses.save([host] + hosts.filter { $0 != host }, for: alias)
+        return (alias, r["name"] as? String ?? host)
+    }
+
+    /// Links to the same computer under an older address. A computer keeps one link per device, so they'd only compete.
+    static func olderLinks(than alias: String) -> [String] {
+        func key(_ a: String) -> String? { SSHTarget(a).flatMap { Platform.defaults.string(forKey: "sync.hostkey.\($0.host):\($0.port)") } }
+        guard let k = key(alias) else { return [] }
+        return SyncEngine.enabledHosts.filter { $0 != alias && key($0) == k }
     }
 
     /// One line out, one line back, or nil if the host can't be reached within a few seconds. Once connected it waits

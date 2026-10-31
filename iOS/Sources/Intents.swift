@@ -39,6 +39,8 @@ struct CopyLatestFromComputers: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let engine = SyncEngine.shared
+        engine.hold(true)
+        defer { engine.hold(false) }
         engine.start()
         let end = Date().addingTimeInterval(10)
         while Date() < end, !engine.statuses.values.contains(where: \.ok), !SyncEngine.enabledHosts.isEmpty {
